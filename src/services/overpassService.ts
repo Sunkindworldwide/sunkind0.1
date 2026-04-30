@@ -50,6 +50,11 @@ export async function fetchShadowData(lat: number, lon: number, radius: number =
   const query = `[out:json][timeout:30];
 (
   nwr["amenity"~"cafe|restaurant|pub|bar|biergarten|nightclub|wine_bar"](around:${radius},${lat},${lon});
+  nwr["leisure"~"park|garden|recreation_ground|playground|nature_reserve|common|pitch"]["name"](around:${radius},${lat},${lon});
+  nwr["landuse"~"grass|meadow|village_green|forest|orchard|vineyard|recreation_ground|cemetery|allotments"]["name"](around:${radius},${lat},${lon});
+  nwr["natural"~"wood|scrub|heath|grassland|fell|sand"]["name"](around:${radius},${lat},${lon});
+  nwr["place"~"square|plaza"]["name"](around:${radius},${lat},${lon});
+  nwr["boundary"~"national_park|protected_area"]["name"](around:${radius},${lat},${lon});
   nwr["leisure"~"park|garden|recreation_ground|playground|nature_reserve|common|pitch"](around:${radius},${lat},${lon});
   nwr["landuse"~"grass|meadow|village_green|forest|orchard|vineyard|recreation_ground|cemetery|allotments"](around:${radius},${lat},${lon});
   nwr["natural"~"wood|scrub|heath|grassland|fell|sand"](around:${radius},${lat},${lon});

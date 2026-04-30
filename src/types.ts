@@ -18,6 +18,7 @@ export interface Place {
   shadowArea?: number;
   sunInHours?: number;
   futureScore?: number;
+  nameSource?: 'osm' | 'fallback';
 }
 
 export interface WeatherData {

@@ -469,6 +469,16 @@ export default function App() {
     return '';
   };
 
+  const hasExactOsmName = (tags: any, langCode: 'en' | 'fr') => {
+    return !!getBestOsmName(tags, langCode);
+  };
+
+  const getParkNamePriority = (p: Place) => {
+    const exact = hasExactOsmName(p.tags || {}, lang);
+    const genericFallback = !exact && p.type === 'park';
+    return exact ? 2 : genericFallback ? 0 : 1;
+  };
+
   const normalizePlaceName = (tags: any, fallbackType: Place['type'], langCode: 'en' | 'fr') => {
     const localizedName = getBestOsmName(tags, langCode);
 
@@ -555,10 +565,15 @@ export default function App() {
       }).filter((p): p is NonNullable<typeof p> => !!p);
 
       // 2. Filter Display Logic
-      const filtered = enriched.filter(p => p && p.type && filters.has(p.type));
+    const filtered = enriched.filter(p => p && p.type && filters.has(p.type));
 
       // User selectable sort mode
       const sorted = [...filtered].sort((a, b) => {
+        const parkPriorityDiff = getParkNamePriority(b) - getParkNamePriority(a);
+        if (parkPriorityDiff !== 0 && (a.type === 'park' || b.type === 'park')) {
+          return parkPriorityDiff;
+        }
+
         if (sortMode === 'sun') {
           if ((b.sunScore || 0) !== (a.sunScore || 0)) {
             return (b.sunScore || 0) - (a.sunScore || 0);
@@ -629,6 +644,10 @@ export default function App() {
           district: p.tags?.district || p.tags?.["addr:city"] || center.name.split(',')[0]
         }))
         .sort((a, b) => {
+          const parkPriorityDiff = getParkNamePriority(b) - getParkNamePriority(a);
+          if (parkPriorityDiff !== 0 && (a.type === 'park' || b.type === 'park')) {
+            return parkPriorityDiff;
+          }
           if ((b.sunScore || 0) !== (a.sunScore || 0)) return (b.sunScore || 0) - (a.sunScore || 0);
           return (a.dist || 0) - (b.dist || 0);
         })
@@ -927,6 +946,7 @@ export default function App() {
           lat: plat,
           lon: plon,
           dist: getDistance(lat, lon, plat, plon),
+          nameSource: hasExactOsmName(tags, lang) ? 'osm' : 'fallback',
           tags: {
             ...el.tags,
             ...(details.address ? { address: details.address } : {}),

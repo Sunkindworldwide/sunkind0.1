@@ -436,27 +436,49 @@ export default function App() {
     return 'bar'; // Default to restau/bar
   };
 
+  const getBestOsmName = (tags: any, langCode: 'en' | 'fr') => {
+    const candidates = [
+      tags.name,
+      tags['name:fr'],
+      tags['name:en'],
+      tags.official_name,
+      tags.short_name,
+      tags.alt_name,
+      tags.local_name,
+      tags.loc_name,
+      tags.old_name,
+      tags.int_name,
+    ];
+
+    for (const candidate of candidates) {
+      if (typeof candidate === 'string' && candidate.trim()) return candidate.trim();
+    }
+
+    const nameKeyOrder = langCode === 'en' ? ['name:en', 'name:fr'] : ['name:fr', 'name:en'];
+    for (const key of nameKeyOrder) {
+      const value = tags[key];
+      if (typeof value === 'string' && value.trim()) return value.trim();
+    }
+
+    for (const [key, value] of Object.entries(tags || {})) {
+      if (key.startsWith('name:') && typeof value === 'string' && value.trim()) {
+        return value.trim();
+      }
+    }
+
+    return '';
+  };
+
   const normalizePlaceName = (tags: any, fallbackType: Place['type'], langCode: 'en' | 'fr') => {
-    const localizedName = langCode === 'en'
-      ? (tags['name:en'] || tags.name || tags.official_name || tags.alt_name || tags.loc_name || tags['name:fr'])
-      : (tags['name:fr'] || tags.name || tags.official_name || tags.alt_name || tags.loc_name || tags['name:en']);
+    const localizedName = getBestOsmName(tags, langCode);
 
     if (localizedName) return localizedName;
 
     const rawType = (tags.leisure || tags.landuse || tags.natural || tags.amenity || tags.place || 'Spot').toString();
     const prettyType = rawType.charAt(0).toUpperCase() + rawType.slice(1).replace(/_/g, ' ');
-    const isParkLike = fallbackType === 'park'
-      || /park|garden|playground|recreation_ground|grass|meadow|village_green|square|plaza|wood|forest|nature_reserve|common|pitch|field|scrub|allotments|cemetery|orchard|vineyard/.test(
-        `${tags.amenity || ''} ${tags.leisure || ''} ${tags.landuse || ''} ${tags.natural || ''} ${tags.place || ''}`.toLowerCase()
-      );
 
-    if (isParkLike) {
-      if (tags.leisure === 'park') return langCode === 'en' ? 'Public Park' : 'Parc public';
-      if (tags.leisure === 'garden') return langCode === 'en' ? 'Urban Garden' : 'Jardin urbain';
-      if (tags.natural === 'wood' || tags.landuse === 'forest') return langCode === 'en' ? 'Urban Woodland' : 'Boisement urbain';
-      if (tags.place === 'square' || tags.place === 'plaza') return langCode === 'en' ? 'City Square' : 'Place urbaine';
-      if (tags.leisure === 'playground') return langCode === 'en' ? 'Play Area' : 'Aire de jeux';
-      return langCode === 'en' ? `Green Space (${prettyType})` : `Espace vert (${prettyType})`;
+    if (fallbackType === 'park') {
+      return prettyType;
     }
 
     if (fallbackType === 'cafe') return langCode === 'en' ? `Café (${prettyType})` : `Café (${prettyType})`;

@@ -108,6 +108,33 @@ async function startServer() {
     res.json({ status: "ok" });
   });
 
+  app.post("/api/overpass", async (req, res) => {
+    try {
+      const query = typeof req.body?.query === "string" ? req.body.query : "";
+      if (!query.trim()) {
+        res.status(400).json({ error: "Missing Overpass query" });
+        return;
+      }
+
+      const upstream = await fetch("https://lz4.overpass-api.de/api/interpreter", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          "User-Agent": "SunkindSolarApp/1.0",
+        },
+        body: `data=${encodeURIComponent(query)}`,
+      });
+
+      const text = await upstream.text();
+      res.status(upstream.status);
+      res.type(upstream.headers.get("content-type") || "application/json");
+      res.send(text);
+    } catch (error) {
+      console.error("Overpass proxy failed:", error);
+      res.status(502).json({ error: "Overpass proxy failed" });
+    }
+  });
+
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
     console.log("Initializing Vite dev server middleware...");

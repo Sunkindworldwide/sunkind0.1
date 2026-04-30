@@ -29,9 +29,6 @@ export async function fetchShadowData(lat: number, lon: number, radius: number =
     return { venues: [], buildings: [] };
   }
 
-  // FAST SERVER SELECTION
-  const overpassUrl = 'https://lz4.overpass-api.de/api/interpreter';
-  
   // 2. LOCAL CACHING
   const cacheKey = `sunkind_osm_${lat.toFixed(3)}_${lon.toFixed(3)}_${radius}`;
   const now = Date.now();
@@ -63,12 +60,12 @@ export async function fetchShadowData(lat: number, lon: number, radius: number =
 out center geom;`;
 
   try {
-    const response = await fetch(overpassUrl, {
+    const response = await fetch('/api/overpass', {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/x-www-form-urlencoded'
+        'Content-Type': 'application/json'
       },
-      body: `data=${encodeURIComponent(query)}`,
+      body: JSON.stringify({ query }),
     });
 
     if (!response.ok) {

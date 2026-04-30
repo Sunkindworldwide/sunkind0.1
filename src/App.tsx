@@ -436,6 +436,52 @@ export default function App() {
     return 'bar'; // Default to restau/bar
   };
 
+  const normalizePlaceName = (tags: any, fallbackType: Place['type'], langCode: 'en' | 'fr') => {
+    const localizedName = langCode === 'en'
+      ? (tags['name:en'] || tags.name || tags.official_name || tags.alt_name || tags.loc_name || tags['name:fr'])
+      : (tags['name:fr'] || tags.name || tags.official_name || tags.alt_name || tags.loc_name || tags['name:en']);
+
+    if (localizedName) return localizedName;
+
+    const rawType = (tags.leisure || tags.landuse || tags.natural || tags.amenity || tags.place || 'Spot').toString();
+    const prettyType = rawType.charAt(0).toUpperCase() + rawType.slice(1).replace(/_/g, ' ');
+    const isParkLike = fallbackType === 'park'
+      || /park|garden|playground|recreation_ground|grass|meadow|village_green|square|plaza|wood|forest|nature_reserve|common|pitch|field|scrub|allotments|cemetery|orchard|vineyard/.test(
+        `${tags.amenity || ''} ${tags.leisure || ''} ${tags.landuse || ''} ${tags.natural || ''} ${tags.place || ''}`.toLowerCase()
+      );
+
+    if (isParkLike) {
+      if (tags.leisure === 'park') return langCode === 'en' ? 'Public Park' : 'Parc public';
+      if (tags.leisure === 'garden') return langCode === 'en' ? 'Urban Garden' : 'Jardin urbain';
+      if (tags.natural === 'wood' || tags.landuse === 'forest') return langCode === 'en' ? 'Urban Woodland' : 'Boisement urbain';
+      if (tags.place === 'square' || tags.place === 'plaza') return langCode === 'en' ? 'City Square' : 'Place urbaine';
+      if (tags.leisure === 'playground') return langCode === 'en' ? 'Play Area' : 'Aire de jeux';
+      return langCode === 'en' ? `Green Space (${prettyType})` : `Espace vert (${prettyType})`;
+    }
+
+    if (fallbackType === 'cafe') return langCode === 'en' ? `Café (${prettyType})` : `Café (${prettyType})`;
+    if (fallbackType === 'bar') return langCode === 'en' ? `Venue (${prettyType})` : `Lieu (${prettyType})`;
+    return prettyType;
+  };
+
+  const getPlaceDetails = (p: Place) => {
+    const tags = p.tags || {};
+    const address = tags.address || tags['addr:full'] || [tags['addr:housenumber'], tags['addr:street'], tags['addr:city']].filter(Boolean).join(' ');
+    const openingHours = tags.opening_hours || tags.hours || tags['opening_hours:covid19'] || null;
+    const website = tags.website || tags.url || tags.contact_website || null;
+    const cuisine = tags.cuisine || null;
+    const operator = tags.operator || tags.brand || null;
+    return { address, openingHours, website, cuisine, operator };
+  };
+
+  const openPlaceDetails = (p: Place) => {
+    setSelectedPlace(p);
+    setActiveTab('list');
+    if (mapRef.current) {
+      mapRef.current.flyTo([p.lat, p.lon], 17, { duration: 1.2 });
+    }
+  };
+
   const calculateScore = (p: Place) => {
     const altDeg = sunPos.altitude * (180 / Math.PI);
     if (altDeg < 0) return 0;
@@ -705,10 +751,7 @@ export default function App() {
         });
         const marker = L.marker([p.lat, p.lon], { icon }).addTo(markersRef.current!);
         
-        marker.on('click', () => {
-          setSelectedPlace(p);
-          setActiveTab('list');
-        });
+        marker.on('click', () => openPlaceDetails(p));
 
         markerObjectsRef.current[p.id.toString()] = marker;
       });
@@ -817,28 +860,9 @@ export default function App() {
         const venuesAsPlaces: Place[] = data.venues.map(el => {
           const tags = el.tags || {};
           
-          // Ultra-precise localized name extraction
-          const localizedName = lang === 'en' 
-            ? (tags['name:en'] || tags.name || tags.official_name || tags.alt_name || tags.loc_name || tags['name:fr']) 
-            : (tags['name:fr'] || tags.name || tags.official_name || tags.alt_name || tags.loc_name || tags['name:en']);
-
-          let name = localizedName || tags.brand || tags.operator || tags.leisure || tags.landuse || tags.natural || tags.amenity;
-          
-          if (!localizedName && !tags.brand && !tags.operator) {
-            // Precise descriptive naming for unnamed features
-            const isNature = tags.natural || tags.landuse === 'forest' || tags.landuse === 'wood';
-            const isPark = tags.leisure === 'park' || tags.leisure === 'garden' || tags.leisure === 'common' || tags.leisure === 'recreation_ground' || tags.landuse === 'grass';
-            const isPlayground = tags.leisure === 'playground' || tags.leisure === 'pitch' || tags.leisure === 'sports_centre';
-            
-            const rawType = tags.leisure || tags.landuse || tags.natural || tags.amenity || 'Spot';
-            const capitalizedType = rawType.charAt(0).toUpperCase() + rawType.slice(1).replace(/_/g, ' ');
-
-            if (isNature) name = lang === 'en' ? `Nature (${capitalizedType})` : `Espace Nature (${capitalizedType})`;
-            else if (isPark) name = lang === 'en' ? `Public Green (${capitalizedType})` : `Espace Vert (${capitalizedType})`;
-            else if (tags.place === 'square' || tags.place === 'plaza') name = lang === 'en' ? 'City Square' : 'Place Urbaine';
-            else if (isPlayground) name = lang === 'en' ? `Activity Area (${capitalizedType})` : `Aire d'activité (${capitalizedType})`;
-            else name = localizedName || capitalizedType;
-          }
+        const fallbackType = mapVenueType(`${tags.amenity || ''} ${tags.leisure || ''} ${tags.landuse || ''} ${tags.place || ''} ${tags.natural || ''}`);
+        const typeHint = fallbackType;
+        const name = normalizePlaceName(tags, typeHint, lang);
 
         const plat = el.lat || el.center?.lat || lat;
         const plon = el.lon || el.center?.lon || lon;
@@ -851,7 +875,7 @@ export default function App() {
         const place = tags.place || '';
         
         // Prioritize park-like tags if present to avoid misclassification by generic amenity tags
-        let type: Place['type'] = 'cafe';
+        let type: Place['type'] = fallbackType;
         const tagsString = `${amenity} ${leisure} ${landuse} ${place} ${natural}`.toLowerCase();
         
         if (tagsString.match(/park|garden|playground|recreation_ground|grass|meadow|village_green|square|plaza|wood|forest|nature_reserve|common|pitch|field|scrub|allotments|cemetery|orchard|vineyard/)) {
@@ -870,14 +894,25 @@ export default function App() {
           }
         }
 
+        const details = getPlaceDetails({
+          ...({ tags } as Place),
+        } as Place);
+
         return {
           id: el.id,
-          name,
+          name: normalizePlaceName(tags, type, lang),
           type,
           lat: plat,
           lon: plon,
           dist: getDistance(lat, lon, plat, plon),
-          tags: el.tags,
+          tags: {
+            ...el.tags,
+            ...(details.address ? { address: details.address } : {}),
+            ...(details.openingHours ? { opening_hours: details.openingHours } : {}),
+            ...(details.website ? { website: details.website } : {}),
+            ...(details.cuisine ? { cuisine: details.cuisine } : {}),
+            ...(details.operator ? { operator: details.operator } : {}),
+          },
           ...expert
         };
       });
@@ -947,14 +982,28 @@ export default function App() {
     // If it's a global suggestion (Photon), get coords
     if (f.properties.isOsm) {
       const [lon, lat] = f.geometry.coordinates;
-      handleMoveTo(lat, lon, name);
+      const localByName = (places || []).find(p => p.name?.toLowerCase() === name.toLowerCase());
+      if (localByName) {
+        openPlaceDetails(localByName);
+      } else {
+        handleMoveTo(lat, lon, name);
+      }
       setSearchInput(name);
       setSuggestions([]);
       return;
     }
 
     const [lon, lat] = f.geometry.coordinates;
-    handleMoveTo(lat, lon, name);
+    const localMatch = (places || []).find(p => {
+      const sameName = p.name === name || p.name?.toLowerCase() === name.toLowerCase();
+      const sameCoords = Math.abs((p.lon || 0) - lon) < 0.0001 && Math.abs((p.lat || 0) - lat) < 0.0001;
+      return sameName || sameCoords;
+    });
+    if (localMatch) {
+      openPlaceDetails(localMatch);
+    } else {
+      handleMoveTo(lat, lon, name);
+    }
     setSearchInput(name);
     setSuggestions([]);
   };
@@ -1452,9 +1501,7 @@ export default function App() {
         animate={{ opacity: 1, y: 0 }}
         transition={{ delay: i * 0.05 }}
         onClick={() => {
-          setSelectedPlace(p);
-          setActiveTab('list');
-          if (mapRef.current) mapRef.current.flyTo([p.lat, p.lon], 17);
+          openPlaceDetails(p);
         }}
         className="card-apple p-5 flex flex-col gap-4 btn-apple mb-4"
       >
@@ -1890,9 +1937,20 @@ export default function App() {
                     </button>
                     
                     <h2 className="text-3xl font-black tracking-tight text-[var(--ink)] mb-1 leading-none">{selectedPlace.name}</h2>
-                    <p className="text-xs font-bold text-[var(--ink3)] uppercase tracking-widest mb-6">
+                    <p className="text-xs font-bold text-[var(--ink3)] uppercase tracking-widest mb-4">
                       {selectedPlace.type.toUpperCase()} · {selectedPlace.dist > 1000 ? `${(selectedPlace.dist/1000).toFixed(1)}km` : `${Math.round(selectedPlace.dist)}m`}
                     </p>
+                    <div className="flex flex-wrap gap-2 mb-6">
+                      {selectedPlace.tags?.address && (
+                        <span className="px-3 py-1.5 rounded-full bg-black/5 text-[10px] font-bold text-[var(--ink2)]">{selectedPlace.tags.address}</span>
+                      )}
+                      {selectedPlace.tags?.opening_hours && (
+                        <span className="px-3 py-1.5 rounded-full bg-emerald-50 text-[10px] font-bold text-emerald-700">{selectedPlace.tags.opening_hours}</span>
+                      )}
+                      {selectedPlace.tags?.operator && (
+                        <span className="px-3 py-1.5 rounded-full bg-blue-50 text-[10px] font-bold text-blue-700">{selectedPlace.tags.operator}</span>
+                      )}
+                    </div>
 
                     <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-8">
                       <div className="p-4 bg-amber-50 rounded-3xl border border-amber-100 flex flex-col items-center justify-center text-center">
@@ -1912,11 +1970,21 @@ export default function App() {
                       </div>
                     </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
-                  <div className="p-6 bg-[var(--cream2)]/30 rounded-[30px] border border-[var(--border)] flex flex-col h-full">
-                    <div className="text-[9px] font-black text-[var(--ink3)] uppercase tracking-widest mb-2">Solar Analytics</div>
-                    <p className="text-xs font-medium text-[var(--ink2)] leading-relaxed italic flex-1">"{selectedPlace.expertTip || 'Excellent exposure verified by neighborhood analysis.'}"</p>
-                  </div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
+                      <div className="p-6 bg-[var(--cream2)]/30 rounded-[30px] border border-[var(--border)] flex flex-col h-full">
+                        <div className="text-[9px] font-black text-[var(--ink3)] uppercase tracking-widest mb-2">Solar Analytics</div>
+                        <p className="text-xs font-medium text-[var(--ink2)] leading-relaxed italic flex-1">"{selectedPlace.expertTip || 'Excellent exposure verified by neighborhood analysis.'}"</p>
+                        {selectedPlace.tags?.website && (
+                          <a
+                            href={selectedPlace.tags.website}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="mt-4 inline-flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-[var(--amber)]"
+                          >
+                            Website <ExternalLink size={12} />
+                          </a>
+                        )}
+                      </div>
                   <div className="flex flex-col gap-3">
                     <button 
                       onClick={() => navigateToMaps(selectedPlace.lat, selectedPlace.lon, selectedPlace.name)}
@@ -1978,12 +2046,10 @@ export default function App() {
                         <div 
                           key={p.id} 
                           onClick={() => {
-                            setSelectedPlace(p);
-                            setActiveTab('list');
-                            if (mapRef.current) mapRef.current.flyTo([p.lat, p.lon], 17);
-                          }} 
-                          className="card-apple overflow-hidden group btn-apple"
-                        >
+                          openPlaceDetails(p);
+                        }} 
+                        className="card-apple overflow-hidden group btn-apple"
+                      >
                            <div className="p-6 flex items-center justify-between">
                               <div className="flex items-center gap-5">
                                  <div className="text-4xl font-black text-[var(--amber)] opacity-20 italic">#{i+1}</div>

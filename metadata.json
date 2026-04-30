@@ -1,0 +1,6 @@
+{
+  "name": "Sunkind — Find the Sun",
+  "description": "Find the sunniest spots nearby. Track solar paths, golden hours, and real-time shadows for cafes, parks, and restaurants.",
+  "requestFramePermissions": ["geolocation"],
+  "majorCapabilities": []
+}

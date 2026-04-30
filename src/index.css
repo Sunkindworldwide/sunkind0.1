@@ -1,0 +1,140 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Playfair+Display:ital,wght@0,700;1,700&family=DM+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --radius-apple: 1.25rem;
+  --radius-ios: 1.5rem;
+}
+
+@layer base {
+  body {
+    @apply font-sans bg-[#F2F2F7] selection:bg-blue-100; /* iOS light background */
+    -webkit-tap-highlight-color: transparent;
+  }
+}
+
+/* Custom Glassmorphism Utility */
+.glass {
+  @apply bg-white/70 backdrop-blur-xl border border-white/40 shadow-sm;
+}
+
+.glass-dark {
+  @apply bg-black/5 backdrop-blur-xl border border-white/20 shadow-sm;
+}
+
+/* Leaflet Overrides for a cleaner look */
+.leaflet-container {
+  @apply bg-[#F2F2F7] font-sans;
+}
+
+.leaflet-control-zoom {
+  @apply border-none! shadow-md! rounded-xl! overflow-hidden;
+}
+
+.leaflet-control-zoom-in, .leaflet-control-zoom-out {
+  @apply bg-white! text-gray-800! border-none! hover:bg-gray-50!;
+}
+
+.custom-marker {
+  @apply transition-transform duration-200;
+}
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-serif: "Playfair Display", serif;
+  --font-mono: "DM Mono", monospace;
+}
+
+:root {
+  --cream: #fdfaf5;
+  --cream2: #f2ede4;
+  --surface: #ffffff;
+  --ink: #1c1c1e;
+  --ink2: #3a3a3c;
+  --ink3: #8e8e93;
+  --amber: #ff9500;
+  --gold: #ffcc00;
+  --border: rgba(0, 0, 0, 0.05);
+  --sh-m: 0 10px 30px rgba(0, 0, 0, 0.04);
+  --sh-l: 0 20px 50px rgba(0, 0, 0, 0.08);
+}
+
+.shade {
+  --cream: #000000;
+  --cream2: #1c1c1e;
+  --surface: #1c1c1e;
+  --ink: #f2f2f7;
+  --ink2: #e5e5ea;
+  --ink3: #8e8e93;
+  --amber: #0a84ff;
+  --gold: #64d2ff;
+  --border: rgba(255, 255, 255, 0.1);
+}
+
+@layer base {
+  html {
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    height: 100%;
+    height: -webkit-fill-available;
+    width: 100vw;
+  }
+  
+  body {
+    @apply text-[var(--ink)] font-sans antialiased transition-colors duration-500 selection:bg-[var(--amber)] selection:text-white bg-[var(--cream)];
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    overflow: hidden;
+    position: fixed;
+    width: 100%;
+  }
+}
+
+.ios-scroll {
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-y: contain;
+}
+
+.card-apple {
+  @apply bg-[var(--surface)] rounded-[32px] border border-[var(--border)] shadow-[var(--sh-m)] transition-all duration-300;
+  -webkit-backdrop-filter: blur(20px);
+}
+
+.card-apple:hover {
+  @apply shadow-[var(--sh-l)] translate-y-[-2px];
+}
+
+.btn-apple {
+  @apply active:scale-95 transition-all duration-200;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.leaflet-container {
+  @apply w-full h-full;
+  filter: saturate(1.1) brightness(1.02);
+}
+
+.leaflet-popup-content-wrapper {
+  background: var(--surface) !important;
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  box-shadow: var(--sh-l) !important;
+  border-radius: 20px !important;
+  padding: 0 !important;
+  border: 1px solid var(--border) !important;
+}
+
+.leaflet-popup-tip {
+  @apply hidden;
+}

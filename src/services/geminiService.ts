@@ -13,7 +13,15 @@ const getApiKey = () => {
   return (process.env.GEMINI_API_KEY as string);
 };
 
-const ai = new GoogleGenAI({ apiKey: getApiKey() });
+const getAiClient = () => {
+  const apiKey = getApiKey();
+  if (!apiKey) {
+    console.warn("Gemini API key is missing. AI search is disabled.");
+    return null;
+  }
+
+  return new GoogleGenAI({ apiKey });
+};
 
 export interface GeminiSolarResult {
   solar: {
@@ -99,6 +107,8 @@ For the "sunlit_reason" field, you MUST follow this pattern exactly:
 export const aiSearch = async (query: string, signal?: AbortSignal): Promise<GeminiSolarResult | null> => {
   try {
     if (signal?.aborted) throw new Error('Aborted');
+    const ai = getAiClient();
+    if (!ai) return null;
     
     const response = await ai.models.generateContent({
       model: "gemini-3-flash-preview",

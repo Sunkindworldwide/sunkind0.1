@@ -91,7 +91,18 @@
     overflow: hidden;
     position: fixed;
     width: 100%;
+    max-width: 100vw;
   }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+#root {
+  width: 100%;
+  max-width: 100vw;
+  overflow: hidden;
 }
 
 .ios-scroll {
@@ -123,6 +134,7 @@
 .leaflet-container {
   @apply w-full h-full;
   filter: saturate(1.1) brightness(1.02);
+  touch-action: pan-x pan-y;
 }
 
 .leaflet-popup-content-wrapper {
@@ -137,4 +149,31 @@
 
 .leaflet-popup-tip {
   @apply hidden;
+}
+
+.map-compact-mode .leaflet-control-zoom {
+  margin-bottom: calc(7rem + env(safe-area-inset-bottom)) !important;
+}
+
+@media (max-width: 767px) {
+  .card-apple {
+    border-radius: 24px;
+  }
+
+  .map-compact-mode .leaflet-control-zoom {
+    margin-bottom: calc(9.25rem + env(safe-area-inset-bottom)) !important;
+  }
+
+  .leaflet-control-attribution {
+    max-width: 70vw;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+}
+
+@media (min-width: 768px) {
+  .map-compact-mode .leaflet-control-zoom {
+    margin-right: 1.25rem !important;
+  }
 }

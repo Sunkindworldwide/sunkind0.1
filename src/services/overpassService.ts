@@ -19,7 +19,7 @@ export interface StructuredOsmData {
 }
 
 /**
- * Fetches cafes/restaurants and building footprints within a specified radius.
+ * Fetches cafes/restaurants, quality outdoor spots, and nearby building footprints.
  * Optimized with local caching and fast server selection.
  */
 export async function fetchShadowData(lat: number, lon: number, radius: number = 800): Promise<StructuredOsmData> {
@@ -30,7 +30,7 @@ export async function fetchShadowData(lat: number, lon: number, radius: number =
   }
 
   // 2. LOCAL CACHING
-  const cacheKey = `sunkind_osm_${lat.toFixed(3)}_${lon.toFixed(3)}_${radius}`;
+  const cacheKey = `sunkind_osm_v4_${lat.toFixed(3)}_${lon.toFixed(3)}_${radius}`;
   const now = Date.now();
   const CACHE_EXPIRY = 24 * 60 * 60 * 1000; // 24 hours
 
@@ -46,21 +46,20 @@ export async function fetchShadowData(lat: number, lon: number, radius: number =
     console.warn("Cache read failed", e);
   }
 
-  // 3. MINIMAL QUERY - Compact syntax
+  // 3. Nearby query. Keep building radius capped so expanded park searches stay fast.
+  const buildingRadius = Math.min(radius, 1500);
   const query = `[out:json][timeout:30];
 (
   nwr["amenity"~"cafe|restaurant|pub|bar|biergarten|nightclub|wine_bar"](around:${radius},${lat},${lon});
-  nwr["leisure"~"park|garden|recreation_ground|playground|nature_reserve|common|pitch"]["name"](around:${radius},${lat},${lon});
-  nwr["landuse"~"grass|meadow|village_green|forest|orchard|vineyard|recreation_ground|cemetery|allotments"]["name"](around:${radius},${lat},${lon});
-  nwr["natural"~"wood|scrub|heath|grassland|fell|sand"]["name"](around:${radius},${lat},${lon});
-  nwr["place"~"square|plaza"]["name"](around:${radius},${lat},${lon});
-  nwr["boundary"~"national_park|protected_area"]["name"](around:${radius},${lat},${lon});
-  nwr["leisure"~"park|garden|recreation_ground|playground|nature_reserve|common|pitch"](around:${radius},${lat},${lon});
-  nwr["landuse"~"grass|meadow|village_green|forest|orchard|vineyard|recreation_ground|cemetery|allotments"](around:${radius},${lat},${lon});
-  nwr["natural"~"wood|scrub|heath|grassland|fell|sand"](around:${radius},${lat},${lon});
+  nwr["leisure"~"park|garden|nature_reserve|recreation_ground|playground"](around:${radius},${lat},${lon});
+  nwr["landuse"~"recreation_ground|village_green|forest|meadow|grass"](around:${radius},${lat},${lon});
+  nwr["natural"~"wood|grassland|heath|beach"](around:${radius},${lat},${lon});
   nwr["place"~"square|plaza"](around:${radius},${lat},${lon});
-  nwr["boundary"~"national_park|protected_area"](around:${radius},${lat},${lon});
-  nwr["building"](around:${radius},${lat},${lon});
+  nwr["boundary"~"national_park|protected_area"]["name"](around:${radius},${lat},${lon});
+  nwr["tourism"~"viewpoint|attraction"](around:${radius},${lat},${lon});
+  nwr["highway"~"pedestrian|footway"]["name"](around:${radius},${lat},${lon});
+  nwr["waterway"]["name"](around:${radius},${lat},${lon});
+  nwr["building"](around:${buildingRadius},${lat},${lon});
 );
 out center geom;`;
 
@@ -96,13 +95,16 @@ out center geom;`;
       
       const tags = el.tags;
       const isAmenity = tags.amenity?.match(/cafe|restaurant|pub|bar|biergarten|nightclub|wine_bar/);
-      const isLeisure = tags.leisure?.match(/park|garden|recreation_ground|playground|nature_reserve|common|pitch/);
-      const isLanduse = tags.landuse?.match(/grass|meadow|village_green|forest|orchard|vineyard|recreation_ground|cemetery|allotments/);
-      const isNatural = tags.natural?.match(/wood|scrub|heath|grassland|fell|sand/);
+      const isLeisure = tags.leisure?.match(/park|garden|nature_reserve|recreation_ground|playground/);
+      const isLanduse = tags.landuse?.match(/recreation_ground|village_green|forest|meadow|grass/);
+      const isNatural = tags.natural?.match(/wood|grassland|heath|beach/);
       const isSquare = tags.place?.match(/square|plaza/);
+      const isBoundary = tags.boundary?.match(/national_park|protected_area/);
+      const isTourism = tags.tourism?.match(/viewpoint|attraction/);
+      const isPromenade = tags.highway?.match(/pedestrian|footway/) || tags.waterway;
       const isBuilding = tags.building;
 
-      if (isAmenity || isLeisure || isLanduse || isSquare || isNatural) {
+      if (isAmenity || isLeisure || isLanduse || isSquare || isNatural || isBoundary || isTourism || isPromenade) {
         venues.push(el);
       }
       if (isBuilding) {

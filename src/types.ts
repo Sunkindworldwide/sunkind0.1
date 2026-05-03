@@ -9,6 +9,19 @@ export interface Place {
   sunScore?: number;
   currentSun?: boolean;
   score?: number;
+  directSun?: {
+    status: 'now' | 'soon' | 'none' | 'unavailable';
+    label: string;
+    score?: number;
+    nextMinutes?: number;
+    confidence: number;
+    confidenceLabel: 'high' | 'medium' | 'low';
+    reason: string;
+    rank: number;
+  };
+  spotQuality?: number;
+  confidence?: 'high' | 'medium' | 'low';
+  reason?: string;
   // Specific analysis fields
   district?: string;
   orientation?: string;
@@ -26,11 +39,19 @@ export interface WeatherData {
   cloud: number;
   wind: number | null;
   code: number;
+  precipitation?: number | null;
+  sunrise?: string;
+  sunset?: string;
   uv?: number;
   condition?: string;
   hourly?: {
     time: string[];
-    cloudcover: number[];
+    cloudcover?: number[];
+    cloud_cover?: number[];
+    precipitation?: number[];
+    precipitation_probability?: number[];
+    weathercode?: number[];
+    weather_code?: number[];
   };
   daily?: any;
 }

@@ -21,19 +21,6 @@ function getSunPosition(lat: number, _lon: number, date: Date) {
   }
 }
 
-function calcSunScore(current: number, futureMinutes: number, continuity: number, timeToSun: number) {
-  try {
-    return Math.round(
-      current * 40 +
-        (futureMinutes / 180) * 30 +
-        continuity * 20 +
-        (1 - Math.min(timeToSun / 180, 1)) * 10
-    );
-  } catch {
-    return 0;
-  }
-}
-
 export default function handler(req: any, res: any) {
   if (req.method !== 'POST') {
     res.status(405).json({ error: 'Method not allowed' });
@@ -42,21 +29,41 @@ export default function handler(req: any, res: any) {
 
   try {
     const locations = Array.isArray(req.body?.locations) ? req.body.locations : [];
+    const weather = req.body?.weather || null;
     const now = new Date();
 
     const results = locations.map((loc: any, i: number) => {
       const lat = Number(loc?.lat) || 0;
       const lon = Number(loc?.lon) || 0;
       const sun = getSunPosition(lat, lon, now);
-      const currentSun = sun.elevation > 0 ? 1 : 0;
-      const score = calcSunScore(currentSun, 60, 0.5, currentSun ? 0 : 30);
+      const cloud = Number(loc?.weather?.cloud ?? weather?.cloud);
+      const precipitation = Number(loc?.weather?.precipitation ?? weather?.precipitation ?? 0);
+      const code = Number(loc?.weather?.code ?? weather?.code ?? 0);
+      const hasWeather = Number.isFinite(cloud) && Number.isFinite(code);
+      const currentSun = hasWeather && sun.elevation > 3 && cloud < 55 && precipitation <= 0 && code < 51;
+      const score = hasWeather ? (currentSun ? Math.round(Math.min(100, Math.max(55, (sun.elevation / 25) * 100))) : 0) : null;
+      const confidence = !hasWeather ? 'low' : cloud < 30 && precipitation <= 0 ? 'high' : 'medium';
+      const reason = !hasWeather
+        ? 'Weather data unavailable'
+        : currentSun
+          ? 'Sun above horizon, clouds allow direct sunlight, no precipitation'
+          : sun.elevation <= 0
+            ? 'Sun below horizon'
+            : precipitation > 0 || code >= 51
+              ? 'Precipitation blocks direct sunlight'
+              : 'Cloud cover too high for direct sunlight';
 
       return {
         id: i,
         name: loc?.name || 'Unknown Place',
-        score: Number(score) || 0,
-        sunScore: Number(score) || 0,
-        currentSun: Boolean(currentSun),
+        sunscore: score,
+        sunStatus: hasWeather ? (currentSun ? 'Direct sun now' : 'No direct sun soon') : 'Sun data unavailable',
+        confidence,
+        reason,
+        score,
+        sunScore: score,
+        currentSun,
+        directSunStatus: hasWeather ? (currentSun ? 'now' : 'none') : 'unavailable',
         nextSunTime: 'N/A',
         duration: 0,
         lat,

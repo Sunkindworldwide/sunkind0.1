@@ -40,7 +40,7 @@ const T = {
     weather: 'Weather',
     clouds: 'Clouds',
     uv: 'UV Index',
-    sunScore: 'SunScore',
+    sunScore: 'Direct sun',
     nearbyResults: 'Nearby',
     foundResults: 'locations found nearby.',
     scanning: 'Scanning local light...',
@@ -100,7 +100,7 @@ const T = {
     weather: 'Météo',
     clouds: 'Nuages',
     uv: 'Index UV',
-    sunScore: 'Score Solaire',
+    sunScore: 'Soleil direct',
     nearbyResults: 'À proximité',
     foundResults: 'lieux trouvés à proximité.',
     scanning: 'Analyse de la lumière...',
@@ -183,6 +183,8 @@ export default function App() {
   const [liveSignals, setLiveSignals] = useState<any[]>([]);
   const [selectedPlace, setSelectedPlace] = useState<Place | null>(null);
   const [isWeatherExpanded, setIsWeatherExpanded] = useState(false);
+  const [isMapCompactMode, setIsMapCompactMode] = useState(false);
+  const [isMapSectionActive, setIsMapSectionActive] = useState(false);
 
   // Fetch live signals
   useEffect(() => {
@@ -210,6 +212,7 @@ export default function App() {
   }, []);
 
   const mapRef = useRef<L.Map | null>(null);
+  const mapSectionRef = useRef<HTMLDivElement | null>(null);
   const userMarkerRef = useRef<L.Marker | null>(null);
   const shadowLayersRef = useRef<L.LayerGroup | null>(null);
   const venueLayersRef = useRef<L.LayerGroup | null>(null);
@@ -223,6 +226,66 @@ export default function App() {
       }, 100);
     }
   }, [activeTab]);
+
+  useEffect(() => {
+    const node = mapSectionRef.current;
+    if (!node || typeof IntersectionObserver === 'undefined') {
+      setIsMapSectionActive(activeTab === 'map' || activeTab === 'list');
+      return;
+    }
+
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        setIsMapSectionActive(entry.isIntersecting && entry.intersectionRatio > 0.35);
+      },
+      { threshold: [0.35, 0.6, 0.85] }
+    );
+
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [activeTab]);
+
+  useEffect(() => {
+    const mapIsUsableView = isMapSectionActive && (activeTab === 'map' || activeTab === 'list') && !selectedPlace;
+    if (!mapIsUsableView) {
+      setIsMapCompactMode(false);
+      return;
+    }
+
+    let touchStartY = 0;
+
+    const handleWheel = (event: WheelEvent) => {
+      if (event.deltaY > 8) setIsMapCompactMode(true);
+      if (event.deltaY < -8) setIsMapCompactMode(false);
+    };
+
+    const handleTouchStart = (event: TouchEvent) => {
+      touchStartY = event.touches[0]?.clientY ?? 0;
+    };
+
+    const handleTouchMove = (event: TouchEvent) => {
+      const currentY = event.touches[0]?.clientY ?? touchStartY;
+      const delta = touchStartY - currentY;
+      if (delta > 18) setIsMapCompactMode(true);
+      if (delta < -18) setIsMapCompactMode(false);
+    };
+
+    window.addEventListener('wheel', handleWheel, { passive: true });
+    window.addEventListener('touchstart', handleTouchStart, { passive: true });
+    window.addEventListener('touchmove', handleTouchMove, { passive: true });
+
+    return () => {
+      window.removeEventListener('wheel', handleWheel);
+      window.removeEventListener('touchstart', handleTouchStart);
+      window.removeEventListener('touchmove', handleTouchMove);
+    };
+  }, [activeTab, isMapSectionActive, selectedPlace]);
+
+  useEffect(() => {
+    if (mapRef.current) {
+      setTimeout(() => mapRef.current?.invalidateSize(), 220);
+    }
+  }, [isMapCompactMode]);
 
   const submitSignal = async (placeId: number | string, feedback: string) => {
     if (!isSupabaseConfigured) {
@@ -249,6 +312,7 @@ export default function App() {
   };
 
   const containerRef = useRef<HTMLDivElement | null>(null); // New ref for better DOM targeting
+  const resultsScrollRef = useRef<HTMLDivElement | null>(null);
   const markersRef = useRef<L.LayerGroup | null>(null);
   const markerObjectsRef = useRef<Record<string, L.Marker>>({}); // Corrected key type to string
   const searchTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -403,16 +467,215 @@ export default function App() {
     if (isPresent && shadows.length > 0) {
       const terrace = turf.circle([p.lon, p.lat], 0.005, { steps: 8, units: 'kilometers' }); // 5m is more realistic
       const geoScore = calculateSunlightScore(terrace, shadows);
-      const cloudFactor = (100 - (weather?.cloud ?? 50)) / 100;
-      const altDeg = elevation * (180 / Math.PI);
+      const weatherSample = getWeatherAtTime(tNow);
+      const cloudFactor = (100 - (weatherSample?.cloud ?? 100)) / 100;
+      const altDeg = elevation;
       const altFactor = Math.max(0, Math.min(1, altDeg / 20)); // More generous: full intensity at 20°
       return Math.round(geoScore * orientationScore * cloudFactor * altFactor);
     }
     
-    const cloudFactor = (100 - (weather?.cloud ?? 50)) / 100;
-    const altDeg = elevation * (180 / Math.PI);
+    const weatherSample = getWeatherAtTime(tNow);
+    const cloudFactor = (100 - (weatherSample?.cloud ?? 100)) / 100;
+    const altDeg = elevation;
     const altFactor = Math.max(0, Math.min(1, altDeg / 20));
     return Math.round(100 * orientationScore * cloudFactor * altFactor);
+  };
+
+  const getWeatherAtTime = (targetTime: Date) => {
+    if (!weather) return null;
+    const current = {
+      cloud: typeof weather.cloud === 'number' ? weather.cloud : null,
+      precipitation: typeof weather.precipitation === 'number' ? weather.precipitation : null,
+      code: typeof weather.code === 'number' ? weather.code : null,
+      forecastType: 'current' as const,
+    };
+
+    const hourly = weather.hourly;
+    if (!hourly?.time?.length) return current;
+
+    let bestIndex = -1;
+    let bestMs = Number.POSITIVE_INFINITY;
+    hourly.time.forEach((timeKey, index) => {
+      const parsed = new Date(timeKey).getTime();
+      if (!Number.isFinite(parsed)) return;
+      const diff = Math.abs(parsed - targetTime.getTime());
+      if (diff < bestMs) {
+        bestMs = diff;
+        bestIndex = index;
+      }
+    });
+
+    if (bestIndex === -1 || bestMs > 75 * 60 * 1000) return current;
+
+    const cloudSeries = hourly.cloudcover || hourly.cloud_cover || [];
+    const codeSeries = hourly.weathercode || hourly.weather_code || [];
+    const precipSeries = hourly.precipitation || [];
+    const precipProbSeries = hourly.precipitation_probability || [];
+    return {
+      cloud: typeof cloudSeries[bestIndex] === 'number' ? cloudSeries[bestIndex] : current.cloud,
+      precipitation: typeof precipSeries[bestIndex] === 'number' ? precipSeries[bestIndex] : current.precipitation,
+      precipitationProbability: typeof precipProbSeries[bestIndex] === 'number' ? precipProbSeries[bestIndex] : null,
+      code: typeof codeSeries[bestIndex] === 'number' ? codeSeries[bestIndex] : current.code,
+      forecastType: 'hourly' as const,
+      minutesFromForecast: Math.round(bestMs / 60000),
+    };
+  };
+
+  const allowsDirectSun = (sample: ReturnType<typeof getWeatherAtTime>) => {
+    if (!sample || typeof sample.cloud !== 'number' || typeof sample.code !== 'number') {
+      return { allowed: false, confidence: 0 };
+    }
+
+    const precip = sample.precipitation ?? 0;
+    const precipProb = 'precipitationProbability' in sample ? sample.precipitationProbability ?? 0 : 0;
+    const wetWeather = precip > 0 || precipProb >= 55 || sample.code >= 51;
+    if (wetWeather) return { allowed: false, confidence: 0.9 };
+    if (sample.cloud >= 70) return { allowed: false, confidence: 0.85 };
+    if (sample.cloud >= 55) return { allowed: false, confidence: 0.65 };
+
+    const cloudConfidence = sample.cloud <= 30 ? 0.9 : 0.72;
+    const forecastPenalty = sample.forecastType === 'hourly' ? 0.18 : 0;
+    return { allowed: true, confidence: Math.max(0.45, cloudConfidence - forecastPenalty) };
+  };
+
+  const getConfidenceLabel = (confidence: number): 'high' | 'medium' | 'low' => {
+    if (confidence >= 0.78) return 'high';
+    if (confidence >= 0.5) return 'medium';
+    return 'low';
+  };
+
+  const isWithinSunriseWindow = (targetTime: Date) => {
+    if (!weather?.sunrise || !weather?.sunset) return true;
+    const sunrise = new Date(weather.sunrise).getTime();
+    const sunset = new Date(weather.sunset).getTime();
+    if (!Number.isFinite(sunrise) || !Number.isFinite(sunset)) return true;
+    return targetTime.getTime() >= sunrise && targetTime.getTime() <= sunset;
+  };
+
+  const assessDirectSunAt = (p: Place, targetTime: Date) => {
+    if (!weather) return { direct: false, confidence: 0, score: undefined as number | undefined, reason: 'Weather data unavailable' };
+    if (!(targetTime instanceof Date) || isNaN(targetTime.getTime())) return { direct: false, confidence: 0, score: undefined as number | undefined, reason: 'Invalid time' };
+    if (typeof p.lat !== 'number' || typeof p.lon !== 'number' || isNaN(p.lat) || isNaN(p.lon)) return { direct: false, confidence: 0, score: undefined as number | undefined, reason: 'Invalid spot coordinates' };
+    if (!isWithinSunriseWindow(targetTime)) return { direct: false, confidence: 0.95, score: 0, reason: 'Outside sunrise/sunset window' };
+
+    const { elevation } = getSunPosition(p.lat, p.lon, targetTime);
+    if (elevation <= 0) return { direct: false, confidence: 0.95, score: 0, reason: 'Sun below horizon' };
+    if (elevation <= 3) return { direct: false, confidence: 0.85, score: 0, reason: 'Sun too low for reliable direct light' };
+
+    const sample = getWeatherAtTime(targetTime);
+    const weatherGate = allowsDirectSun(sample);
+    if (!weatherGate.allowed) {
+      const reason = !sample
+        ? 'Weather data unavailable'
+        : (sample.precipitation ?? 0) > 0 || ('precipitationProbability' in sample && (sample.precipitationProbability ?? 0) >= 55) || (sample.code ?? 0) >= 51
+          ? 'Precipitation or storm conditions block direct sun'
+          : 'Cloud cover too high for direct sun';
+      return { direct: false, confidence: weatherGate.confidence, score: 0, reason };
+    }
+
+    const geometryScore = calculateGeometryScore(p, targetTime);
+    const cloud = sample?.cloud ?? 100;
+    const clearGuardrail = elevation > 5 && cloud < 30 && (sample?.precipitation ?? 0) <= 0;
+    const partlyCloudy = elevation > 5 && cloud < 55 && (sample?.precipitation ?? 0) <= 0;
+    const direct = clearGuardrail || partlyCloudy || geometryScore >= 35;
+    let score = 0;
+    if (direct) {
+      const base = Math.round(Math.min(100, Math.max(35, geometryScore)));
+      if (clearGuardrail) score = Math.max(60, base);
+      else if (partlyCloudy) score = Math.max(35, base);
+      else score = base;
+    }
+    const reason = clearGuardrail
+      ? 'Sun above horizon, low cloud cover, no precipitation'
+      : partlyCloudy
+        ? 'Sun above horizon with partial cloud cover'
+        : 'Sun position, weather, and local geometry support direct sun';
+    return {
+      direct,
+      confidence: Math.min(0.95, weatherGate.confidence + (shadows.length ? 0.08 : 0)),
+      score,
+      reason,
+    };
+  };
+
+  const buildDirectSunStatus = (p: Place): NonNullable<Place['directSun']> => {
+    if (!weather) {
+      return {
+        status: 'unavailable',
+        label: lang === 'en' ? 'Sun data unavailable' : 'Données soleil indisponibles',
+        confidence: 0,
+        confidenceLabel: 'low',
+        reason: 'Weather data unavailable',
+        rank: 0,
+      };
+    }
+
+    const current = assessDirectSunAt(p, now);
+    if (current.direct && current.confidence >= 0.55) {
+      return {
+        status: 'now',
+        label: lang === 'en' ? 'Direct sun now' : 'Soleil direct maintenant',
+        score: current.score,
+        confidence: current.confidence,
+        confidenceLabel: getConfidenceLabel(current.confidence),
+        reason: current.reason || 'Direct sun conditions detected',
+        rank: 400 + (current.score || 0),
+      };
+    }
+
+    for (const minutes of [5, 10, 30]) {
+      const targetTime = new Date(now.getTime() + minutes * 60000);
+      const future = assessDirectSunAt(p, targetTime);
+      const requiredConfidence = minutes <= 10 ? 0.5 : 0.45;
+      if (future.direct && future.confidence >= requiredConfidence) {
+        const base = minutes <= 10 ? 300 : 200;
+        return {
+          status: 'soon',
+          label: lang === 'en' ? `Direct sun in ~${minutes} min` : `Soleil direct dans ~${minutes} min`,
+          score: minutes <= 5 ? 82 : minutes <= 10 ? 72 : 55,
+          nextMinutes: minutes,
+          confidence: future.confidence,
+          confidenceLabel: getConfidenceLabel(future.confidence),
+          reason: future.reason || 'Short-term forecast supports direct sun',
+          rank: base - minutes,
+        };
+      }
+    }
+
+    return {
+      status: 'none',
+      label: lang === 'en' ? 'No direct sun soon' : 'Pas de soleil direct bientôt',
+      score: 0,
+      confidence: Math.max(0.45, current.confidence),
+      confidenceLabel: getConfidenceLabel(Math.max(0.45, current.confidence)),
+      reason: current.reason || 'No direct sun expected in the next 30 minutes',
+      rank: 10,
+    };
+  };
+
+  const logDirectSunDebug = (p: Place, directSun: NonNullable<Place['directSun']>) => {
+    if (!import.meta.env.DEV) return;
+    const sample = getWeatherAtTime(now);
+    const { elevation } = getSunPosition(p.lat, p.lon, now);
+    console.debug('[sunscore]', {
+      selectedLat: center.lat,
+      selectedLon: center.lon,
+      spotLat: p.lat,
+      spotLon: p.lon,
+      localTime: formatTime(now),
+      timezone: locationTimezone,
+      sunElevation: elevation,
+      cloudCover: sample?.cloud,
+      precipitation: sample?.precipitation,
+      conditionCode: sample?.code,
+      openMeteoCondition: weather?.condition,
+      sunrise: weather?.sunrise,
+      sunset: weather?.sunset,
+      finalSunscore: directSun.score,
+      sunStatus: directSun.label,
+      confidence: directSun.confidenceLabel,
+      reason: directSun.reason,
+    });
   };
 
   const getOrientationAngle = (orient?: string) => {
@@ -474,9 +737,7 @@ export default function App() {
   };
 
   const getParkNamePriority = (p: Place) => {
-    const exact = hasExactOsmName(p.tags || {}, lang);
-    const genericFallback = !exact && p.type === 'park';
-    return exact ? 2 : genericFallback ? 0 : 1;
+    return p.type === 'park' ? Math.round(p.spotQuality || 0) : 0;
   };
 
   const normalizePlaceName = (tags: any, fallbackType: Place['type'], langCode: 'en' | 'fr') => {
@@ -504,6 +765,153 @@ export default function App() {
     const cuisine = tags.cuisine || null;
     const operator = tags.operator || tags.brand || null;
     return { address, openingHours, website, cuisine, operator };
+  };
+
+  const getParkBoundary = (el: OsmElement) => {
+    if (!el.geometry || el.geometry.length < 4) return null;
+    try {
+      const ring = el.geometry
+        .filter(point => typeof point.lat === 'number' && typeof point.lon === 'number')
+        .map(point => [point.lon, point.lat]);
+      if (ring.length < 4) return null;
+      const first = ring[0];
+      const last = ring[ring.length - 1];
+      if (first[0] !== last[0] || first[1] !== last[1]) ring.push(first);
+      return turf.polygon([ring]);
+    } catch {
+      return null;
+    }
+  };
+
+  const getAreaScore = (areaSqm: number) => {
+    if (!areaSqm || areaSqm <= 0) return 20;
+    if (areaSqm < 800) return 5;
+    if (areaSqm < 2500) return 18;
+    if (areaSqm < 10000) return 45;
+    if (areaSqm < 50000) return 75;
+    return 95;
+  };
+
+  const getCategoryQuality = (tags: any) => {
+    const tagString = `${tags.leisure || ''} ${tags.landuse || ''} ${tags.natural || ''} ${tags.boundary || ''} ${tags.place || ''} ${tags.tourism || ''} ${tags.highway || ''} ${tags.waterway || ''} ${tags.access || ''}`.toLowerCase();
+    if (tags.access === 'private' || tagString.match(/parking|school|hotel|restaurant|shop|office|indoor/)) return 0;
+    if (tagString.match(/national_park|nature_reserve|protected_area/)) return 98;
+    if (tagString.match(/park|garden/)) return 90;
+    if (tagString.match(/recreation_ground|village_green|forest|wood|beach/)) return 72;
+    if (tagString.match(/square|plaza|waterway|pedestrian|footway|viewpoint|attraction/)) return 56;
+    if (tagString.match(/playground|dog_park|pitch/)) return 22;
+    if (tagString.match(/grass|meadow|grassland|heath/)) return 18;
+    return 12;
+  };
+
+  const getMetadataScore = (tags: any) => {
+    const reviews = Number(tags.review_count || tags.reviews || tags.user_ratings_total || tags.ratings_count || 0);
+    const photos = Number(tags.photos_count || tags.photo_count || 0);
+    const richTags = [
+      tags.wikidata,
+      tags.wikipedia,
+      tags.website,
+      tags.image,
+      tags.tourism,
+      tags.historic,
+      tags.operator,
+      tags.opening_hours,
+    ].filter(Boolean).length;
+    return Math.min(100, Math.max(reviews * 3, photos * 2) + richTags * 10);
+  };
+
+  const getDistanceQuality = (dist: number) => {
+    if (dist <= 500) return 100;
+    if (dist <= 1200) return 82;
+    if (dist <= 2500) return 58;
+    if (dist <= 5000) return 35;
+    return 12;
+  };
+
+  const getDirectSunQuality = (p: Place) => {
+    if (p.directSun?.status === 'now') return 100;
+    if (p.directSun?.status === 'soon' && (p.directSun.nextMinutes || 30) <= 10) return 78;
+    if (p.directSun?.status === 'soon') return 58;
+    if (p.directSun?.status === 'unavailable') return 20;
+    return 8;
+  };
+
+  const scoreOutdoorSpot = (p: Place) => {
+    if (p.type !== 'park') {
+      return {
+        score: p.spotQuality || 50,
+        confidence: p.confidence || 'medium',
+        reason: p.reason || 'Indoor venue quality uses existing venue signals'
+      };
+    }
+    const tags = p.tags || {};
+    const category = getCategoryQuality(tags);
+    const distance = getDistanceQuality(p.dist || 0);
+    const area = getAreaScore(Number(tags.area_sqm || 0));
+    const metadata = getMetadataScore(tags);
+    const sizePopularity = Math.max(area, metadata);
+    const sun = getDirectSunQuality(p);
+    const score = Math.round(distance * 0.3 + category * 0.3 + sizePopularity * 0.2 + sun * 0.2);
+    const lowSignals = category < 30 || (Number(tags.area_sqm || 0) > 0 && Number(tags.area_sqm || 0) < 800 && metadata < 15);
+    const confidence: 'high' | 'medium' | 'low' = score >= 72 && !lowSignals ? 'high' : score >= 45 && category >= 45 ? 'medium' : 'low';
+    const reason = confidence === 'high'
+      ? 'Strong outdoor category, useful distance, and quality signals'
+      : confidence === 'medium'
+        ? 'Relevant outdoor spot with moderate quality signals'
+        : 'Weak category, tiny area, low metadata, or uncertain outdoor usefulness';
+    return { score, confidence, reason };
+  };
+
+  const isLowQualityPark = (p: Place) => {
+    if (p.type !== 'park') return false;
+    const tags = p.tags || {};
+    const category = getCategoryQuality(tags);
+    const area = Number(tags.area_sqm || 0);
+    const metadata = getMetadataScore(tags);
+    const playgroundOnly = tags.leisure === 'playground' && category < 45;
+    const dogOnly = `${tags.leisure || ''} ${tags.amenity || ''}`.includes('dog_park');
+    return category <= 22 || playgroundOnly || dogOnly || (area > 0 && area < 800 && metadata < 15);
+  };
+
+  const mergeDuplicateOutdoorSpots = (input: Place[]) => {
+    const merged: Place[] = [];
+    for (const place of input) {
+      const externalId = place.tags?.osm_external_id;
+      const name = (place.name || '').trim().toLowerCase();
+      let mergeIndex = -1;
+      for (let i = 0; i < merged.length; i++) {
+        const candidate = merged[i];
+        if (candidate.type !== place.type) continue;
+        const candidateExternalId = candidate.tags?.osm_external_id;
+        const distance = getDistance(place.lat, place.lon, candidate.lat, candidate.lon);
+        const sameExternalId = externalId && candidateExternalId && externalId === candidateExternalId;
+        const sameNameNearby = name && name === (candidate.name || '').trim().toLowerCase() && distance <= 200;
+        const sameCoords = distance <= 20;
+        if (sameExternalId || sameNameNearby || sameCoords) {
+          mergeIndex = i;
+          break;
+        }
+      }
+
+      if (mergeIndex === -1) {
+        merged.push(place);
+        continue;
+      }
+
+      const existing = merged[mergeIndex];
+      const keepIncoming = (place.spotQuality || 0) > (existing.spotQuality || 0);
+      const best = keepIncoming ? place : existing;
+      const other = keepIncoming ? existing : place;
+      merged[mergeIndex] = {
+        ...best,
+        tags: {
+          ...other.tags,
+          ...best.tags,
+          duplicate_merged: true,
+        },
+      };
+    }
+    return merged;
   };
 
   const openPlaceDetails = (p: Place) => {
@@ -553,15 +961,21 @@ export default function App() {
       const enriched = sortedByDist.map((p, idx) => {
         if (!p) return null;
         
-        // Always calculate current score
-        const score = calculateGeometryScore(p);
+        const directSun = buildDirectSunStatus(p);
+        logDirectSunDebug(p, directSun);
+        const quality = scoreOutdoorSpot({ ...p, directSun });
         
-        // FUTURE SUN CALCULATION REMOVED FROM LIST FOR PERFORMANCE
-        // It was the main cause of lag. We only need it for the selected place or in suggestions.
-        let futureScore = 0;
-        let sunInHours = undefined;
-
-        return { ...p, sunScore: p.sunScore ?? score, futureScore, sunInHours };
+        return {
+          ...p,
+          directSun,
+          currentSun: directSun.status === 'now',
+          sunScore: directSun.score,
+          futureScore: directSun.status === 'soon' ? directSun.score : 0,
+          sunInHours: undefined,
+          spotQuality: p.type === 'park' ? quality.score : p.spotQuality,
+          confidence: p.type === 'park' ? quality.confidence : p.confidence,
+          reason: p.type === 'park' ? quality.reason : p.reason,
+        };
       }).filter((p): p is NonNullable<typeof p> => !!p);
 
       // 2. Filter Display Logic
@@ -569,17 +983,16 @@ export default function App() {
 
       // User selectable sort mode
       const sorted = [...filtered].sort((a, b) => {
-        const parkPriorityDiff = getParkNamePriority(b) - getParkNamePriority(a);
-        if (parkPriorityDiff !== 0 && (a.type === 'park' || b.type === 'park')) {
-          return parkPriorityDiff;
-        }
-
         if (sortMode === 'sun') {
-          if ((b.sunScore || 0) !== (a.sunScore || 0)) {
-            return (b.sunScore || 0) - (a.sunScore || 0);
+          if ((b.directSun?.rank || 0) !== (a.directSun?.rank || 0)) {
+            return (b.directSun?.rank || 0) - (a.directSun?.rank || 0);
           }
+          const qualityDiff = (b.spotQuality || 0) - (a.spotQuality || 0);
+          if (Math.abs(qualityDiff) >= 8) return qualityDiff;
           return (a.dist || 0) - (b.dist || 0);
         } else {
+          const qualityDiff = (b.spotQuality || 0) - (a.spotQuality || 0);
+          if ((a.type === 'park' || b.type === 'park') && Math.abs(qualityDiff) >= 8) return qualityDiff;
           return (a.dist || 0) - (b.dist || 0);
         }
       });
@@ -602,7 +1015,7 @@ export default function App() {
       console.error("Critical error in processedPlaces:", e);
       return [];
     }
-  }, [places, filters, mode, now, sunPos, shadows, weather, categoryLimits]);
+  }, [places, filters, mode, now, sunPos, shadows, weather, categoryLimits, lang]);
 
   // ALL filtered places for the MAP (limited for performance)
   const mapPlaces = useMemo(() => {
@@ -612,12 +1025,12 @@ export default function App() {
       // Increased limits for better visibility across zooms
       if (zoom < 14) {
         return [...processedPlaces]
-          .sort((a, b) => (b.sunScore || 0) - (a.sunScore || 0))
+          .sort((a, b) => (b.directSun?.rank || 0) - (a.directSun?.rank || 0))
           .slice(0, 10);
       }
       if (zoom < 16) {
         return [...processedPlaces]
-          .sort((a, b) => (b.sunScore || 0) - (a.sunScore || 0))
+          .sort((a, b) => (b.directSun?.rank || 0) - (a.directSun?.rank || 0))
           .slice(0, 30);
       }
       
@@ -638,17 +1051,22 @@ export default function App() {
       // If none match filters, show everything
       if (relevant.length === 0) relevant = [...places];
 
-      return relevant.map(p => ({ 
-          ...p, 
-          sunScore: calculateGeometryScore(p),
+      return relevant.map(p => {
+          const directSun = buildDirectSunStatus(p);
+          const quality = scoreOutdoorSpot({ ...p, directSun });
+          return { 
+          ...p,
+          directSun,
+          currentSun: directSun.status === 'now',
+          sunScore: directSun.score,
+          spotQuality: p.type === 'park' ? quality.score : p.spotQuality,
           district: p.tags?.district || p.tags?.["addr:city"] || center.name.split(',')[0]
-        }))
+        };
+        })
         .sort((a, b) => {
-          const parkPriorityDiff = getParkNamePriority(b) - getParkNamePriority(a);
-          if (parkPriorityDiff !== 0 && (a.type === 'park' || b.type === 'park')) {
-            return parkPriorityDiff;
-          }
-          if ((b.sunScore || 0) !== (a.sunScore || 0)) return (b.sunScore || 0) - (a.sunScore || 0);
+          if ((b.directSun?.rank || 0) !== (a.directSun?.rank || 0)) return (b.directSun?.rank || 0) - (a.directSun?.rank || 0);
+          const qualityDiff = (b.spotQuality || 0) - (a.spotQuality || 0);
+          if (Math.abs(qualityDiff) >= 8) return qualityDiff;
           return (a.dist || 0) - (b.dist || 0);
         })
         .slice(0, 10);
@@ -656,7 +1074,7 @@ export default function App() {
       console.error("Top 10 error:", e);
       return [];
     }
-  }, [places, filters, mode, shadows, weather?.cloud, sunPos, center]);
+  }, [places, filters, mode, shadows, weather, sunPos, center, lang, now]);
 
   // Initialize Map
   useEffect(() => {
@@ -725,13 +1143,18 @@ export default function App() {
   // Render Shadows on Map
   useEffect(() => {
     if (shadows.length > 0 && places.length > 0) {
-      setPlaces(prev => prev.map(p => ({
-        ...p,
-        sunScore: calculateGeometryScore(p)
-      })));
+      setPlaces(prev => prev.map(p => {
+        const directSun = buildDirectSunStatus(p);
+        return {
+          ...p,
+          directSun,
+          currentSun: directSun.status === 'now',
+          sunScore: directSun.score,
+        };
+      }));
       setLoading(false); // Ensure loading stops when scores are ready
     }
-  }, [shadows.length, places.length]);
+  }, [shadows.length, places.length, weather, now, lang]);
 
   useEffect(() => {
     if (shadowLayersRef.current && shadows.length > 0) {
@@ -770,10 +1193,11 @@ export default function App() {
       const isNight = sunPos.altitude < 0;
 
       mapPlaces.forEach(p => {
-        const score = p.sunScore || 0;
+        const score = p.directSun?.score || 0;
+        const scoreText = p.directSun?.status === 'unavailable' ? '--' : `${score}%`;
         const status = getStatus(p);
         const iconEmoji = p.type === 'cafe' ? '☕' : p.type === 'bar' ? '🍷' : '🌳';
-        const isHigh = score > 60;
+        const isHigh = p.directSun?.status === 'now' || p.directSun?.status === 'soon';
 
         const icon = L.divIcon({
           className: '',
@@ -782,7 +1206,7 @@ export default function App() {
               <div class="absolute -bottom-1 left-1/2 -translate-x-1/2 w-3 h-3 rotate-45 ${isHigh ? 'bg-amber-500' : 'bg-white'} border-r border-b ${isHigh ? 'border-amber-400' : 'border-gray-200'} z-0 shadow-sm"></div>
               <div class="relative z-10 flex items-center gap-1.5 ${isHigh ? 'bg-amber-500 text-white' : 'bg-white text-gray-800'} px-3 py-1.5 rounded-[12px] shadow-[0_8px_20px_rgba(0,0,0,0.15)] border-[1.5px] border-white/40 hover:-translate-y-1 hover:scale-105 transition-all active:scale-95">
                 <span class="text-[14px] leading-none drop-shadow-sm">${iconEmoji}</span>
-                <span class="text-[11px] font-black tracking-tighter tabular-nums">${score}%</span>
+                <span class="text-[11px] font-black tracking-tighter tabular-nums">${scoreText}</span>
               </div>
             </div>
           `,
@@ -842,10 +1266,11 @@ export default function App() {
 
   const fetchWeather = async (lat: number, lon: number) => {
     try {
-      const r = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,cloudcover,windspeed_10m,weathercode&hourly=cloudcover,temperature_2m,weathercode&timezone=auto&forecast_days=4`);
+      const r = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,cloud_cover,wind_speed_10m,weather_code,precipitation&hourly=cloud_cover,precipitation,precipitation_probability,weather_code&daily=sunrise,sunset&timezone=auto&forecast_days=2`);
       const d = await r.json();
       
-      const code = d.current.weathercode;
+      const code = d.current.weather_code ?? d.current.weathercode;
+      const cloud = d.current.cloud_cover ?? d.current.cloudcover;
       let cond = 'Clear';
       if (code > 0 && code < 3) cond = 'Partly Cloudy';
       else if (code >= 3) cond = 'Cloudy';
@@ -855,9 +1280,12 @@ export default function App() {
 
       setWeather({
         temp: d.current.temperature_2m,
-        cloud: d.current.cloudcover,
-        wind: d.current.windspeed_10m,
+        cloud,
+        wind: d.current.wind_speed_10m ?? d.current.windspeed_10m,
         code: code,
+        precipitation: d.current.precipitation ?? null,
+        sunrise: d.daily?.sunrise?.[0],
+        sunset: d.daily?.sunset?.[0],
         condition: cond,
         hourly: d.hourly,
         daily: d.daily
@@ -873,12 +1301,11 @@ export default function App() {
       return { venues: [], bCount: 0 };
     }
 
-    const cacheKey = `${lat.toFixed(3)},${lon.toFixed(3)}`;
+    const cacheKey = `v5:${lat.toFixed(3)},${lon.toFixed(3)}`;
     if (!force && cacheRef.current[cacheKey]) {
       if (!skipState) setPlaces(cacheRef.current[cacheKey]);
       return { venues: cacheRef.current[cacheKey], bCount: 0 };
     }
-    const radius = 1200; // Increased radius for better park coverage
 
     if (!isPro && searchCount >= SEARCH_LIMIT) {
       setLoading(false);
@@ -891,7 +1318,25 @@ export default function App() {
     if (!skipState) setPlaces([]); 
 
     try {
-      const data = await fetchShadowData(lat, lon, radius);
+      let data = await fetchShadowData(lat, lon, 1500);
+      let sourceRadius = 1500;
+      const countQualityParks = (items: OsmElement[]) => items.filter(el => {
+        const tags = el.tags || {};
+        const category = getCategoryQuality(tags);
+        return category >= 45;
+      }).length;
+
+      if (countQualityParks(data.venues) < 6) {
+        const expanded = await fetchShadowData(lat, lon, 5000);
+        data = { venues: expanded.venues, buildings: data.buildings.length ? data.buildings : expanded.buildings };
+        sourceRadius = 5000;
+      }
+
+      if (countQualityParks(data.venues) < 4) {
+        const expanded = await fetchShadowData(lat, lon, 10000);
+        data = { venues: expanded.venues, buildings: data.buildings.length ? data.buildings : expanded.buildings };
+        sourceRadius = 10000;
+      }
       
       // Process Buildings
       setBuildings(data.buildings);
@@ -901,9 +1346,11 @@ export default function App() {
         const venuesAsPlaces: Place[] = data.venues.map(el => {
           const tags = el.tags || {};
           
-        const fallbackType = mapVenueType(`${tags.amenity || ''} ${tags.leisure || ''} ${tags.landuse || ''} ${tags.place || ''} ${tags.natural || ''}`);
+        const fallbackType = mapVenueType(`${tags.amenity || ''} ${tags.leisure || ''} ${tags.landuse || ''} ${tags.place || ''} ${tags.natural || ''} ${tags.boundary || ''} ${tags.tourism || ''} ${tags.highway || ''} ${tags.waterway || ''}`);
         const typeHint = fallbackType;
         const name = normalizePlaceName(tags, typeHint, lang);
+        const boundary = getParkBoundary(el);
+        const areaSqm = boundary ? Math.round(turf.area(boundary)) : 0;
 
         const plat = el.lat || el.center?.lat || lat;
         const plon = el.lon || el.center?.lon || lon;
@@ -913,13 +1360,17 @@ export default function App() {
         const leisure = tags.leisure || '';
         const landuse = tags.landuse || '';
         const natural = tags.natural || '';
+        const boundaryTag = tags.boundary || '';
         const place = tags.place || '';
+        const tourism = tags.tourism || '';
+        const highway = tags.highway || '';
+        const waterway = tags.waterway || '';
         
         // Prioritize park-like tags if present to avoid misclassification by generic amenity tags
         let type: Place['type'] = fallbackType;
-        const tagsString = `${amenity} ${leisure} ${landuse} ${place} ${natural}`.toLowerCase();
+        const tagsString = `${amenity} ${leisure} ${landuse} ${place} ${natural} ${boundaryTag} ${tourism} ${highway} ${waterway}`.toLowerCase();
         
-        if (tagsString.match(/park|garden|playground|recreation_ground|grass|meadow|village_green|square|plaza|wood|forest|nature_reserve|common|pitch|field|scrub|allotments|cemetery|orchard|vineyard/)) {
+        if (tagsString.match(/park|garden|playground|recreation_ground|grass|meadow|village_green|square|plaza|wood|forest|nature_reserve|national_park|protected_area|beach|waterway|pedestrian|footway|viewpoint/)) {
           type = 'park';
         } else if (tagsString.match(/cafe|café|coffee|brasserie|breakfast|bakery/)) {
           type = 'cafe';
@@ -939,7 +1390,7 @@ export default function App() {
           ...({ tags } as Place),
         } as Place);
 
-        return {
+        const placeDraft: Place = {
           id: el.id,
           name: normalizePlaceName(tags, type, lang),
           type,
@@ -949,6 +1400,9 @@ export default function App() {
           nameSource: hasExactOsmName(tags, lang) ? 'osm' : 'fallback',
           tags: {
             ...el.tags,
+            osm_external_id: `${el.type}/${el.id}`,
+            search_radius_m: sourceRadius,
+            ...(areaSqm ? { area_sqm: areaSqm } : {}),
             ...(details.address ? { address: details.address } : {}),
             ...(details.openingHours ? { opening_hours: details.openingHours } : {}),
             ...(details.website ? { website: details.website } : {}),
@@ -957,12 +1411,29 @@ export default function App() {
           },
           ...expert
         };
+        const quality = scoreOutdoorSpot(placeDraft);
+        return {
+          ...placeDraft,
+          spotQuality: quality.score,
+          confidence: quality.confidence,
+          reason: quality.reason,
+        };
       });
 
-      if (!skipState) setPlaces(venuesAsPlaces);
-      cacheRef.current[cacheKey] = venuesAsPlaces;
+      const rankedPlaces = mergeDuplicateOutdoorSpots(venuesAsPlaces)
+        .filter(p => p.type !== 'park' || !isLowQualityPark(p) || (p.dist || 0) < 500)
+        .sort((a, b) => {
+          if (a.type === 'park' || b.type === 'park') {
+            const qualityDiff = (b.spotQuality || 0) - (a.spotQuality || 0);
+            if (Math.abs(qualityDiff) >= 8) return qualityDiff;
+          }
+          return (a.dist || 0) - (b.dist || 0);
+        });
+
+      if (!skipState) setPlaces(rankedPlaces);
+      cacheRef.current[cacheKey] = rankedPlaces;
       setLoading(false);
-      return { venues: venuesAsPlaces, bCount };
+      return { venues: rankedPlaces, bCount };
     } catch (e) {
       console.error('Shadow fetching failed:', e);
       setLoading(false);
@@ -1152,26 +1623,23 @@ export default function App() {
           body: JSON.stringify({
             locations: uniquePlaces,
             date: new Date().toISOString().split('T')[0],
-            time: formatTimeManual(new Date())
+            time: formatTimeManual(new Date()),
+            weather: weather ? {
+              cloud: weather.cloud,
+              precipitation: weather.precipitation ?? 0,
+              code: weather.code,
+            } : null,
           })
         });
         const data = await res.json();
 
         if (Array.isArray(data) && data.length > 0) {
-          const dataArray = data as any[];
-          const scoredMap = new Map();
-          dataArray.forEach(s => {
-            if (s && s.name) scoredMap.set(s.name, s);
-          });
-
           const finalized = uniquePlaces.map(p => {
-            const s = scoredMap.get(p.name);
             return {
               ...p,
-              sunScore: typeof s?.score === 'number' ? s.score : p.sunScore,
-              currentSun: typeof s?.currentSun === 'boolean' ? s.currentSun : p.currentSun,
+              currentSun: p.currentSun,
             };
-          }).sort((a,b) => (b.sunScore || 0) - (a.sunScore || 0));
+          }).sort((a,b) => a.dist - b.dist);
           setPlaces(finalized);
         } else {
           setPlaces(uniquePlaces.sort((a,b) => a.dist - b.dist));
@@ -1207,10 +1675,14 @@ export default function App() {
         date: now.toISOString().split('T')[0],
         current_time: formatTime(now),
         user_query: query,
-        locations: places.map(p => ({
-          ...p,
-          sunScore: calculateGeometryScore(p)
-        })),
+        locations: places.map(p => {
+          const directSun = p.directSun || buildDirectSunStatus(p);
+          return {
+            ...p,
+            sunScore: directSun.score ?? 0,
+            condition: directSun.label,
+          };
+        }),
         user_signals: liveSignals
       });
       setAiDecision(decision);
@@ -1515,26 +1987,21 @@ export default function App() {
 
   const renderPlaceCard = (p: Place, i: number, showExpert = true) => {
     if (!p) return null;
-    const score = p.sunScore ?? p.score ?? 0;
+    const directSun = p.directSun || buildDirectSunStatus(p);
+    const score = directSun.score ?? 0;
     const isNight = sunPos.altitude < 0;
     const isFav = Array.isArray(favorites) && favorites.some(f => f && f.id !== undefined && p.id !== undefined && f.id.toString() === p.id.toString());
     const status = getStatus(p);
-    const sunStatus = p.currentSun;
 
     // Get Solar Label
-    let solarLabel = null;
-    let solarColor = '';
-    
-    if (score > 60) {
-      solarLabel = lang === 'en' ? '☀️ Sunny now' : '☀️ Ensoleillé';
-      solarColor = 'text-orange-500';
-    } else if (score >= 20) {
-      solarLabel = lang === 'en' ? '🌤 Partly sunny' : '🌤 Partiellement ensoleillé';
-      solarColor = 'text-yellow-600';
-    } else if (score === 0 && p.sunInHours) {
-      solarLabel = lang === 'en' ? `⏳ Sun in ${p.sunInHours}h` : `⏳ Soleil dans ${p.sunInHours}h`;
-      solarColor = 'text-blue-500';
-    }
+    const solarLabel = directSun.status === 'none' ? null : directSun.label;
+    const solarColor = directSun.status === 'now'
+      ? 'text-orange-500'
+      : directSun.status === 'soon'
+        ? 'text-yellow-600'
+        : directSun.status === 'unavailable'
+          ? 'text-slate-400'
+          : 'text-[var(--ink3)]';
     
     return (
       <motion.div 
@@ -1639,33 +2106,98 @@ export default function App() {
     );
   };
 
+  const featureFilters = [
+    { id: 'cafe', icon: Coffee, lab: lang === 'en' ? 'Cafes' : 'Cafés' },
+    { id: 'park', icon: Trees, lab: lang === 'en' ? 'Parks' : 'Parcs' },
+    { id: 'bar', icon: Beer, lab: lang === 'en' ? 'Bars' : 'Bars' }
+  ];
+
+  const CompactControlButton = ({
+    icon: Icon,
+    label,
+    ariaLabel,
+    active,
+    onClick
+  }: {
+    icon: React.ElementType;
+    label: string;
+    ariaLabel: string;
+    active?: boolean;
+    onClick: () => void;
+  }) => (
+    <button
+      type="button"
+      aria-label={ariaLabel}
+      onClick={onClick}
+      className={`h-10 px-3 rounded-2xl border shadow-xl backdrop-blur-2xl flex items-center gap-2 text-[10px] font-black uppercase tracking-wider transition-all active:scale-95 shrink-0 ${
+        active
+          ? 'bg-[var(--ink)] text-white border-transparent'
+          : 'bg-white/90 text-[var(--ink2)] border-[var(--border)] hover:bg-white'
+      }`}
+    >
+      <Icon size={15} />
+      <span className="hidden sm:inline">{label}</span>
+    </button>
+  );
+
+  const FeatureFilterButton = ({ f, compact = false }: { f: typeof featureFilters[number]; compact?: boolean }) => (
+    <button
+      key={f.id}
+      type="button"
+      aria-label={`${filters.has(f.id) ? 'Disable' : 'Enable'} ${f.lab} filter`}
+      onClick={() => toggleFilter(f.id as any)}
+      className={`flex items-center gap-2 rounded-2xl text-[9px] font-black uppercase tracking-widest transition-all shrink-0 ${
+        compact ? 'px-3 py-2' : 'px-4 py-2'
+      } ${
+        filters.has(f.id)
+          ? 'bg-[var(--ink)] text-white shadow-xl'
+          : 'bg-black/[0.03] text-[var(--ink3)] hover:bg-black/[0.06]'
+      }`}
+    >
+      <f.icon className="w-3 h-3" />
+      <span>{f.lab}</span>
+    </button>
+  );
+
+  const exitCompactControls = () => {
+    setIsMapCompactMode(false);
+    setTimeout(() => mapRef.current?.invalidateSize(), 240);
+  };
+
+  const showExpandedControls = !isMapCompactMode;
+
   return (
-    <div className="relative h-screen w-full overflow-hidden bg-[var(--cream)]">
+    <div className={`relative h-screen w-full overflow-hidden bg-[var(--cream)] ${isMapCompactMode ? 'map-compact-mode' : ''}`}>
 
       {/* 1. LAYER: FULL-SCREEN MAP */}
-      <div className="absolute inset-0 z-0">
+      <div ref={mapSectionRef} className="absolute inset-0 z-0">
         <div id="map-container" ref={containerRef} className="h-full w-full" />
       </div>
 
       {/* 2. LAYER: TOP BRANDING & SEARCH OVERLAY */}
-      <div className="absolute top-0 inset-x-0 z-[1000] pointer-events-none p-4 md:p-6 flex flex-col gap-4">
+      <div className="absolute top-0 inset-x-0 z-[1000] pointer-events-none p-3 sm:p-4 md:p-6 flex flex-col gap-3 md:gap-4 max-h-[calc(100dvh-6rem)] overflow-visible">
         <motion.div 
           initial={{ y: -50, opacity: 0 }}
           animate={{ y: 0, opacity: 1 }}
-          className="w-full flex items-center justify-between pointer-events-auto"
+          className={`w-full flex items-center justify-between pointer-events-auto transition-all duration-300 ${
+            isMapCompactMode
+              ? 'max-w-full sm:max-w-xl md:max-w-sm glass rounded-[1.5rem] px-3 py-2 shadow-2xl'
+              : ''
+          }`}
         >
           <div className="flex flex-col">
-            <h1 className="text-2xl font-black text-[var(--ink)] tracking-tighter leading-none">
-              Sunkind<span className="text-[var(--amber)]"> — Find the Sun</span>
+            <h1 className={`${isMapCompactMode ? 'text-lg sm:text-xl' : 'text-xl sm:text-2xl'} font-black text-[var(--ink)] tracking-tighter leading-none transition-all duration-300`}>
+              Sun Kind{!isMapCompactMode && <span className="text-[var(--amber)]"> — Find the Sun</span>}
             </h1>
-            <span className="text-[10px] font-black uppercase tracking-[0.2em] text-[var(--ink3)] mt-1">
+            <span className="text-[9px] sm:text-[10px] font-black uppercase tracking-[0.14em] sm:tracking-[0.2em] text-[var(--ink3)] mt-1 truncate max-w-[64vw] sm:max-w-none">
               {formatDateHeader(now)}
             </span>
           </div>
           
-          <div className="flex items-center gap-3">
+          <div className={`${isMapCompactMode ? 'hidden sm:flex' : 'flex'} items-center gap-2 sm:gap-3`}>
              <button 
                onClick={() => setLang(lang === 'en' ? 'fr' : 'en')}
+               aria-label={lang === 'en' ? 'Switch language to French' : 'Passer la langue en anglais'}
                className="w-10 h-10 rounded-2xl bg-white/80 backdrop-blur-xl border border-[var(--border)] shadow-xl flex items-center justify-center text-[var(--ink2)] btn-apple"
              >
                <Languages size={18} />
@@ -1685,12 +2217,60 @@ export default function App() {
           </div>
         </motion.div>
 
+        <AnimatePresence>
+          {isMapCompactMode && (
+            <motion.div
+              initial={{ opacity: 0, y: -14 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -14 }}
+              transition={{ duration: 0.22 }}
+              className="w-full pointer-events-auto overflow-x-auto no-scrollbar"
+            >
+              <div className="flex items-center gap-2 pr-2 max-w-full">
+                <CompactControlButton
+                  icon={Search}
+                  label={lang === 'en' ? 'Search' : 'Recherche'}
+                  ariaLabel={lang === 'en' ? 'Expand search controls' : 'Afficher les contrôles de recherche'}
+                  onClick={exitCompactControls}
+                />
+                <CompactControlButton
+                  icon={Cloud}
+                  label={lang === 'en' ? 'Weather' : 'Météo'}
+                  ariaLabel={lang === 'en' ? 'Expand weather controls' : 'Afficher les contrôles météo'}
+                  onClick={() => {
+                    setIsWeatherExpanded(true);
+                    exitCompactControls();
+                  }}
+                />
+                <CompactControlButton
+                  icon={Clock}
+                  label={formatLocalTime(now)}
+                  ariaLabel={lang === 'en' ? 'Expand time controls' : 'Afficher les contrôles horaires'}
+                  active={simHour !== null}
+                  onClick={exitCompactControls}
+                />
+                {featureFilters.map(f => (
+                  <CompactControlButton
+                    key={f.id}
+                    icon={f.icon}
+                    label={f.lab}
+                    ariaLabel={`${filters.has(f.id) ? 'Disable' : 'Enable'} ${f.lab} filter`}
+                    active={filters.has(f.id)}
+                    onClick={() => toggleFilter(f.id)}
+                  />
+                ))}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
         {/* WEATHER FEATURES - REDESIGNED */}
         <motion.div 
           initial={{ y: -20, opacity: 0 }}
-          animate={{ y: 0, opacity: 1 }}
+          animate={showExpandedControls ? { y: 0, opacity: 1, height: 'auto' } : { y: -28, opacity: 0, height: 0 }}
           transition={{ delay: 0.1 }}
-          className="w-full pointer-events-auto"
+          className="w-full pointer-events-auto overflow-hidden"
+          aria-hidden={!showExpandedControls}
         >
           <div 
             onClick={() => setIsWeatherExpanded(!isWeatherExpanded)}
@@ -1782,9 +2362,10 @@ export default function App() {
         {/* SEARCH BAR */}
         <motion.div 
           initial={{ y: -20, opacity: 0 }}
-          animate={{ y: 0, opacity: 1 }}
+          animate={showExpandedControls ? { y: 0, opacity: 1, height: 'auto' } : { y: -28, opacity: 0, height: 0 }}
           transition={{ delay: 0.2 }}
-          className="w-full max-w-2xl pointer-events-auto"
+          className="w-full max-w-2xl pointer-events-auto overflow-hidden"
+          aria-hidden={!showExpandedControls}
         >
           <div className="glass rounded-[2rem] p-2 flex flex-col gap-2 shadow-2xl">
             <div className="flex items-center gap-2 px-4 py-1">
@@ -1840,24 +2421,7 @@ export default function App() {
             </div>
             
             <div className="flex gap-1.5 px-3 pb-2 border-t border-[var(--border)] pt-2 overflow-x-auto no-scrollbar">
-              {[
-                { id: 'cafe', icon: Coffee, lab: lang === 'en' ? 'Cafes' : 'Cafés' },
-                { id: 'park', icon: Trees, lab: lang === 'en' ? 'Parks' : 'Parcs' },
-                { id: 'bar', icon: Beer, lab: lang === 'en' ? 'Bars' : 'Bars' }
-              ].map(f => (
-                <button
-                  key={f.id}
-                  onClick={() => toggleFilter(f.id as any)}
-                  className={`flex items-center gap-2 px-4 py-2 rounded-2xl text-[9px] font-black uppercase tracking-widest transition-all shrink-0 ${
-                    filters.has(f.id) 
-                      ? 'bg-[var(--ink)] text-white shadow-xl' 
-                      : 'bg-black/[0.03] text-[var(--ink3)]'
-                  }`}
-                >
-                  <f.icon className="w-3 h-3" />
-                  {f.lab}
-                </button>
-              ))}
+              {featureFilters.map(f => <FeatureFilterButton key={f.id} f={f} />)}
             </div>
           </div>
         </motion.div>
@@ -1865,9 +2429,10 @@ export default function App() {
         {/* TIME SLIDER */}
         <motion.div 
           initial={{ y: -20, opacity: 0 }}
-          animate={{ y: 0, opacity: 1 }}
+          animate={showExpandedControls ? { y: 0, opacity: 1, height: 'auto' } : { y: -28, opacity: 0, height: 0 }}
           transition={{ delay: 0.3 }}
-          className="w-full max-w-sm pointer-events-auto"
+          className="w-full max-w-sm pointer-events-auto overflow-hidden"
+          aria-hidden={!showExpandedControls}
         >
           <div className="card-apple p-1 pr-5 bg-white/90 backdrop-blur-2xl flex items-center gap-4">
              <div className="px-5 py-3.5 bg-[var(--ink)] rounded-[24px] text-white font-mono text-[10px] font-black tabular-nums transition-colors">
@@ -1899,12 +2464,14 @@ export default function App() {
         dragElastic={0.1}
         initial={{ y: '90%' }}
         animate={{ 
-          y: (selectedPlace || activeTab !== 'map' || processedPlaces.length > 0) 
+          y: isMapCompactMode && activeTab === 'map' && !selectedPlace
+            ? '76%'
+            : (selectedPlace || activeTab !== 'map' || processedPlaces.length > 0) 
             ? (selectedPlace ? '15%' : '45%') 
             : '82%' 
         }}
         transition={{ type: 'spring', damping: 30, stiffness: 150 }}
-        className="absolute inset-x-0 bottom-0 z-[1001] pointer-events-none pt-[120px]"
+        className="absolute inset-x-0 bottom-0 z-[1001] pointer-events-none pt-[100px] sm:pt-[120px]"
       >
         <div className="h-screen w-full max-w-2xl mx-auto glass rounded-t-[3rem] shadow-[0_-20px_60px_rgba(0,0,0,0.25)] pointer-events-auto flex flex-col border-t-2 border-white/60">
           <div className="w-full flex flex-col items-center p-5 shrink-0 cursor-grab active:cursor-grabbing">
@@ -1929,7 +2496,15 @@ export default function App() {
             )}
           </div>
 
-          <div className="flex-1 overflow-y-auto px-6 pb-40 no-scrollbar ios-scroll pointer-events-auto touch-pan-y">
+          <div
+            ref={resultsScrollRef}
+            onScroll={(event) => {
+              if ((activeTab === 'map' || activeTab === 'list') && !selectedPlace) {
+                setIsMapCompactMode(event.currentTarget.scrollTop > 24);
+              }
+            }}
+            className="flex-1 overflow-y-auto px-4 sm:px-6 pb-40 no-scrollbar ios-scroll pointer-events-auto touch-pan-y"
+          >
             {activeTab === 'map' ? (
               <div className="space-y-10 py-2 animate-in fade-in slide-in-from-bottom-5">
                 <div className="flex items-center justify-between">
@@ -1996,9 +2571,11 @@ export default function App() {
 
                     <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-8">
                       <div className="p-4 bg-amber-50 rounded-3xl border border-amber-100 flex flex-col items-center justify-center text-center">
-                        <Sun className={`w-5 h-5 mb-1 ${selectedPlace.sunScore > 50 ? 'text-amber-500 animate-pulse' : 'text-amber-300'}`} />
-                        <span className="text-[14px] font-black text-amber-600 line-height-none leading-none">{selectedPlace.sunScore}%</span>
-                        <span className="text-[8px] font-black text-amber-400 uppercase tracking-tighter mt-1">SunScore</span>
+                        <Sun className={`w-5 h-5 mb-1 ${(selectedPlace.directSun?.status || buildDirectSunStatus(selectedPlace).status) === 'now' ? 'text-amber-500 animate-pulse' : 'text-amber-300'}`} />
+                        <span className="text-[11px] font-black text-amber-600 line-height-none leading-tight">{(selectedPlace.directSun || buildDirectSunStatus(selectedPlace)).label}</span>
+                        <span className="text-[8px] font-black text-amber-400 uppercase tracking-tighter mt-1">
+                          {(selectedPlace.directSun || buildDirectSunStatus(selectedPlace)).score ?? '--'} Sunscore
+                        </span>
                       </div>
                       <div className="p-4 bg-blue-50 rounded-3xl border border-blue-100 flex flex-col items-center justify-center text-center">
                         <Navigation className="text-blue-500 w-5 h-5 mb-1" />
@@ -2015,7 +2592,17 @@ export default function App() {
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
                       <div className="p-6 bg-[var(--cream2)]/30 rounded-[30px] border border-[var(--border)] flex flex-col h-full">
                         <div className="text-[9px] font-black text-[var(--ink3)] uppercase tracking-widest mb-2">Solar Analytics</div>
-                        <p className="text-xs font-medium text-[var(--ink2)] leading-relaxed italic flex-1">"{selectedPlace.expertTip || 'Excellent exposure verified by neighborhood analysis.'}"</p>
+                        <p className="text-xs font-medium text-[var(--ink2)] leading-relaxed italic flex-1">"{selectedPlace.expertTip || (selectedPlace.directSun || buildDirectSunStatus(selectedPlace)).reason}"</p>
+                        {(selectedPlace.directSun || buildDirectSunStatus(selectedPlace)).status === 'none' && (
+                          <span className="mt-3 text-[9px] font-bold text-[var(--ink3)] uppercase tracking-widest">
+                            No direct sun expected soon
+                          </span>
+                        )}
+                        {selectedPlace.confidence && (
+                          <span className="mt-3 text-[9px] font-black text-[var(--ink3)] uppercase tracking-widest">
+                            Spot confidence: {selectedPlace.confidence}
+                          </span>
+                        )}
                         {selectedPlace.tags?.website && (
                           <a
                             href={selectedPlace.tags.website}
@@ -2101,7 +2688,7 @@ export default function App() {
                                  </div>
                               </div>
                               <div className="text-right">
-                                 <div className="text-3xl font-black text-[var(--amber)]">{p.sunScore}%</div>
+                                 <div className="text-3xl font-black text-[var(--amber)]">{p.sunScore ?? '--'}{typeof p.sunScore === 'number' ? '%' : ''}</div>
                               </div>
                            </div>
                         </div>

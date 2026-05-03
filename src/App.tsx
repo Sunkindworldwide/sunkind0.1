@@ -1570,6 +1570,8 @@ export default function App() {
         setCenter({ lat, lon, name });
         if (mapRef.current) mapRef.current.flyTo([lat, lon], 15);
       }
+
+      await fetchWeather(lat, lon);
       
       // FETCH PLACES WRAPPER
       let osmResults: Place[] = [];

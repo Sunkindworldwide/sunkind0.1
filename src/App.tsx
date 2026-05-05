@@ -26,6 +26,8 @@ import { getSunDecision } from './services/decisionService';
 import ReactMarkdown from 'react-markdown';
 
 const DEFAULT_LOC = { lat: 48.8566, lon: 2.3522, name: 'Search for sun...' };
+type SearchState = 'idle' | 'searching' | 'success' | 'empty' | 'error';
+const APP_VERSION_LABEL = 'UX Merge 2026-05-05';
 
 const T = {
   en: {
@@ -167,6 +169,8 @@ export default function App() {
   const [filters, setFilters] = useState<Set<string>>(new Set(['cafe', 'bar', 'park']));
   const [sortMode, setSortMode] = useState<'sun' | 'dist'>('sun');
   const [loading, setLoading] = useState(false);
+  const [hasActiveSearch, setHasActiveSearch] = useState(false);
+  const [searchState, setSearchState] = useState<SearchState>('idle');
   const [systemStatus, setSystemStatus] = useState<string>('');
   const [zoom, setZoom] = useState(15);
   const [displayLimit, setDisplayLimit] = useState(15); 
@@ -174,6 +178,20 @@ export default function App() {
   const [searchInput, setSearchInput] = useState('');
   const [suggestions, setSuggestions] = useState<any[]>([]);
   const [isSearchingGps, setIsSearchingGps] = useState(false);
+  const [showLocationPrompt, setShowLocationPrompt] = useState(false);
+  const [locationFallbackMessage, setLocationFallbackMessage] = useState('');
+  const [showCafeSubmit, setShowCafeSubmit] = useState(false);
+  const [showPlaceMoreDetails, setShowPlaceMoreDetails] = useState(false);
+  const [placeSubmitType, setPlaceSubmitType] = useState<Place['type']>('cafe');
+  const [cafeSubmitName, setCafeSubmitName] = useState('');
+  const [placeSubmitPosition, setPlaceSubmitPosition] = useState<{ lat: number; lon: number } | null>(null);
+  const [seatingSpotPosition, setSeatingSpotPosition] = useState<{ lat: number; lon: number } | null>(null);
+  const [positionPickerTarget, setPositionPickerTarget] = useState<'place' | 'seating' | null>(null);
+  const [outdoorSeating, setOutdoorSeating] = useState<'yes' | 'no' | 'unknown'>('unknown');
+  const [spotType, setSpotType] = useState('unknown');
+  const [shadeSource, setShadeSource] = useState('unknown');
+  const [cafeSubmitNote, setCafeSubmitNote] = useState('');
+  const [cafeSubmitLoading, setCafeSubmitLoading] = useState(false);
   const [isExposureOpen, setIsExposureOpen] = useState(true);
   const [locationTimezone, setLocationTimezone] = useState<string>(Intl.DateTimeFormat().resolvedOptions().timeZone);
   const [buildings, setBuildings] = useState<OsmElement[]>([]);
@@ -217,6 +235,7 @@ export default function App() {
   const shadowLayersRef = useRef<L.LayerGroup | null>(null);
   const venueLayersRef = useRef<L.LayerGroup | null>(null);
   const cacheRef = useRef<Record<string, Place[]>>({});
+  const activeRequestRef = useRef(0);
 
   // Invalidate map size when tab changes to ensure visibility
   useEffect(() => {
@@ -311,14 +330,120 @@ export default function App() {
     }
   };
 
+  const resetCafeSubmit = () => {
+    setCafeSubmitName('');
+    setPlaceSubmitType('cafe');
+    setPlaceSubmitPosition(null);
+    setSeatingSpotPosition(null);
+    setPositionPickerTarget(null);
+    setOutdoorSeating('unknown');
+    setSpotType('unknown');
+    setShadeSource('unknown');
+    setCafeSubmitNote('');
+    setShowPlaceMoreDetails(false);
+  };
+
+  const openSeatingSpotSubmit = (place?: Place) => {
+    if (place) {
+      setCafeSubmitName(place.name);
+      setPlaceSubmitType(place.type);
+      setPlaceSubmitPosition({ lat: place.lat, lon: place.lon });
+    }
+    setShowCafeSubmit(true);
+  };
+
+  const submitCafeSuggestion = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!isSupabaseConfigured) {
+      alert("Please connect Supabase to submit places.");
+      return;
+    }
+
+    const name = cafeSubmitName.trim();
+    if (!name) {
+      alert(lang === 'en' ? 'Place name is required.' : 'Le nom du lieu est requis.');
+      return;
+    }
+    if (!placeSubmitPosition) {
+      alert(lang === 'en' ? 'Choose the place position from the map.' : 'Choisissez la position du lieu sur la carte.');
+      return;
+    }
+    if (!seatingSpotPosition) {
+      alert(lang === 'en' ? 'Drop a pin on the exact outdoor seating area.' : 'Placez une épingle sur la zone extérieure exacte.');
+      return;
+    }
+
+    setCafeSubmitLoading(true);
+    try {
+      const placeId = `place_submission_${Date.now()}`;
+      const { error } = await supabase.from('signals').insert({
+        place_id: placeId,
+        user_location: center.name,
+        feedback: JSON.stringify({
+          kind: 'place_submission',
+          name,
+          type: placeSubmitType,
+          place_position: placeSubmitPosition,
+          seating_spot_position: seatingSpotPosition,
+          outdoor_seating: outdoorSeating,
+          spot_type: spotType,
+          shade_source: shadeSource,
+          note: cafeSubmitNote.trim() || null,
+          map_center: center,
+        }),
+      });
+
+      if (error) throw error;
+      setShowCafeSubmit(false);
+      resetCafeSubmit();
+      alert(lang === 'en' ? 'Place submitted for review.' : 'Lieu envoyé pour vérification.');
+    } catch (error) {
+      console.error("Place submit error", error);
+      alert(lang === 'en' ? 'Failed to submit place.' : 'Impossible d’envoyer le lieu.');
+    } finally {
+      setCafeSubmitLoading(false);
+    }
+  };
+
   const containerRef = useRef<HTMLDivElement | null>(null); // New ref for better DOM targeting
   const resultsScrollRef = useRef<HTMLDivElement | null>(null);
   const markersRef = useRef<L.LayerGroup | null>(null);
   const markerObjectsRef = useRef<Record<string, L.Marker>>({}); // Corrected key type to string
   const searchTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const positionPickerTargetRef = useRef<'place' | 'seating' | null>(null);
 
   const [currentTime, setCurrentTime] = useState(new Date());
+
+  useEffect(() => {
+    positionPickerTargetRef.current = positionPickerTarget;
+  }, [positionPickerTarget]);
+
+  const debugSearch = (event: string, payload: Record<string, unknown> = {}) => {
+    if (import.meta.env.DEV) {
+      console.debug(`[Sunkind search] ${event}`, payload);
+    }
+  };
+
+  const beginSearchRequest = (trigger: string) => {
+    abortControllerRef.current?.abort();
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+    activeRequestRef.current += 1;
+    const requestId = activeRequestRef.current;
+
+    setHasActiveSearch(true);
+    setSearchState('searching');
+    setLoading(true);
+    setSelectedPlace(null);
+    debugSearch('trigger', { trigger, requestId });
+
+    return { controller, requestId };
+  };
+
+  const isStaleRequest = (requestId: number, signal?: AbortSignal) => (
+    signal?.aborted || requestId !== activeRequestRef.current
+  );
 
   // Update clock every minute when not simulating
   useEffect(() => {
@@ -979,7 +1104,7 @@ export default function App() {
       }).filter((p): p is NonNullable<typeof p> => !!p);
 
       // 2. Filter Display Logic
-    const filtered = enriched.filter(p => p && p.type && filters.has(p.type));
+      const filtered = enriched.filter(p => p && p.type && filters.has(p.type));
 
       // User selectable sort mode
       const sorted = [...filtered].sort((a, b) => {
@@ -1039,6 +1164,30 @@ export default function App() {
       return [];
     }
   }, [processedPlaces, zoom]);
+
+  useEffect(() => {
+    if (!hasActiveSearch) return;
+    if (loading) {
+      debugSearch('loading state', { state: 'searching', systemStatus });
+      return;
+    }
+    if (places.length > 0 && processedPlaces.length === 0) {
+      debugSearch('reason results hidden', {
+        reason: 'all results filtered out',
+        rawCount: places.length,
+        activeCategory: Array.from(filters),
+        filters: Array.from(filters),
+      });
+    } else if (places.length === 0 && searchState !== 'idle') {
+      debugSearch('reason results hidden', {
+        reason: searchState === 'empty' ? 'no results found' : 'no places in state',
+        activeCategory: Array.from(filters),
+        filters: Array.from(filters),
+      });
+    } else {
+      debugSearch('results found', { rawCount: places.length, visibleCount: processedPlaces.length });
+    }
+  }, [hasActiveSearch, loading, places.length, processedPlaces.length, filters, searchState, systemStatus]);
 
   // Top 10 for high-level analysis
   const top10 = useMemo(() => {
@@ -1103,6 +1252,18 @@ export default function App() {
 
           map.on('dblclick', (e) => {
             const { lat, lng } = e.latlng;
+            const pickerTarget = positionPickerTargetRef.current;
+            if (pickerTarget) {
+              if (pickerTarget === 'seating') {
+                setSeatingSpotPosition({ lat, lon: lng });
+              } else {
+                setPlaceSubmitPosition({ lat, lon: lng });
+              }
+              setPositionPickerTarget(null);
+              positionPickerTargetRef.current = null;
+              setShowCafeSubmit(true);
+              return;
+            }
             handleMoveTo(lat, lng, lang === 'en' ? 'Custom Point' : 'Point Personnalisé');
           });
 
@@ -1220,6 +1381,7 @@ export default function App() {
 
         markerObjectsRef.current[p.id.toString()] = marker;
       });
+      debugSearch('markers rendered count', { count: mapPlaces.length });
     }
   }, [mapPlaces, mode]); // Removed sunPos from here to avoid minute-by-minute marker re-renders
 
@@ -1239,34 +1401,44 @@ export default function App() {
   };
 
   // Location logic
-  const handleMoveTo = async (lat: number, lon: number, name: string, force = false) => {
-    if (abortControllerRef.current) abortControllerRef.current.abort();
-    abortControllerRef.current = new AbortController();
-
-    setLoading(true);
+  const handleMoveTo = async (lat: number, lon: number, name: string, force = false, trigger = 'map_area') => {
+    const { controller, requestId } = beginSearchRequest(trigger);
+    const signal = controller.signal;
     setCenter({ lat, lon, name });
     if (mapRef.current) mapRef.current.flyTo([lat, lon], 16.5, { duration: 1.5 });
+    setSystemStatus(T[lang].scanning);
+    debugSearch('coordinates used', { lat, lon, trigger, activeCategory: Array.from(filters), filters: Array.from(filters) });
     
     try {
-      const weatherPromise = fetchWeather(lat, lon);
-      const placesPromise = fetchPlaces(lat, lon, force);
+      const weatherPromise = fetchWeather(lat, lon, signal);
+      const placesPromise = fetchPlaces(lat, lon, force, false, signal, requestId);
       
       const [_, result] = await Promise.all([
         weatherPromise,
         placesPromise
       ]);
+      if (isStaleRequest(requestId, signal)) return 0;
+      setSearchState(result.venues.length > 0 ? 'success' : 'empty');
       return result.venues.length;
     } catch (e: any) {
+      if (e.name === 'AbortError') return 0;
       console.error(e);
+      if (!isStaleRequest(requestId, signal)) {
+        setSearchState('error');
+        setSystemStatus(T[lang].searchFailed);
+      }
       return 0;
     } finally {
-      setLoading(false);
+      if (!isStaleRequest(requestId, signal)) {
+        setLoading(false);
+        setSystemStatus('');
+      }
     }
   };
 
-  const fetchWeather = async (lat: number, lon: number) => {
+  const fetchWeather = async (lat: number, lon: number, signal?: AbortSignal) => {
     try {
-      const r = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,cloud_cover,wind_speed_10m,weather_code,precipitation&hourly=cloud_cover,precipitation,precipitation_probability,weather_code&daily=sunrise,sunset&timezone=auto&forecast_days=2`);
+      const r = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,cloud_cover,wind_speed_10m,weather_code,precipitation&hourly=cloud_cover,precipitation,precipitation_probability,weather_code&daily=sunrise,sunset&timezone=auto&forecast_days=2`, { signal });
       const d = await r.json();
       
       const code = d.current.weather_code ?? d.current.weathercode;
@@ -1291,31 +1463,37 @@ export default function App() {
         daily: d.daily
       });
     } catch (e) {
+      if ((e as any).name === 'AbortError') throw e;
       console.warn("Weather fetch failed", e);
     }
   };
 
-  const fetchPlaces = async (lat: number, lon: number, force = false, skipState = false) => {
+  const fetchPlaces = async (lat: number, lon: number, force = false, skipState = false, signal?: AbortSignal, requestId = activeRequestRef.current) => {
     if (typeof lat !== 'number' || typeof lon !== 'number' || isNaN(lat) || isNaN(lon)) {
       console.error("Invalid coordinates for fetchPlaces", { lat, lon });
+      debugSearch('reason results hidden', { reason: 'invalid coordinates', lat, lon });
       return { venues: [], bCount: 0 };
     }
 
     const cacheKey = `v5:${lat.toFixed(3)},${lon.toFixed(3)}`;
     if (!force && cacheRef.current[cacheKey]) {
-      if (!skipState) setPlaces(cacheRef.current[cacheKey]);
+      debugSearch('cache hit', { cacheKey, count: cacheRef.current[cacheKey].length });
+      if (!skipState && !isStaleRequest(requestId, signal)) setPlaces(cacheRef.current[cacheKey]);
       return { venues: cacheRef.current[cacheKey], bCount: 0 };
     }
 
     if (!isPro && searchCount >= SEARCH_LIMIT) {
       setLoading(false);
       setShowPaywall(true);
+      setSearchState('error');
+      debugSearch('reason results hidden', { reason: 'premium gating', isPro, searchCount, SEARCH_LIMIT });
       return { venues: [], bCount: 0 };
     }
 
-    setLoading(true);
+    if (!skipState) setLoading(true);
     setSystemStatus(T[lang].scanning);
-    if (!skipState) setPlaces([]); 
+    if (!skipState && !isStaleRequest(requestId, signal)) setPlaces([]); 
+    debugSearch('API request started', { lat, lon, activeCategory: Array.from(filters), filters: Array.from(filters) });
 
     try {
       let data = await fetchShadowData(lat, lon, 1500);
@@ -1337,6 +1515,7 @@ export default function App() {
         data = { venues: expanded.venues, buildings: data.buildings.length ? data.buildings : expanded.buildings };
         sourceRadius = 10000;
       }
+      if (isStaleRequest(requestId, signal)) return { venues: [], bCount: 0 };
       
       // Process Buildings
       setBuildings(data.buildings);
@@ -1430,13 +1609,16 @@ export default function App() {
           return (a.dist || 0) - (b.dist || 0);
         });
 
-      if (!skipState) setPlaces(rankedPlaces);
+      if (!skipState && !isStaleRequest(requestId, signal)) setPlaces(rankedPlaces);
       cacheRef.current[cacheKey] = rankedPlaces;
-      setLoading(false);
+      debugSearch('API response count', { count: rankedPlaces.length, sourceRadius });
+      if (!skipState && !isStaleRequest(requestId, signal)) setLoading(false);
       return { venues: rankedPlaces, bCount };
     } catch (e) {
+      if ((e as any).name === 'AbortError') throw e;
       console.error('Shadow fetching failed:', e);
-      setLoading(false);
+      debugSearch('reason results hidden', { reason: 'fetch error', error: e instanceof Error ? e.message : String(e) });
+      if (!skipState && !isStaleRequest(requestId, signal)) setLoading(false);
       return { venues: [], bCount: 0 };
     }
   };
@@ -1499,7 +1681,7 @@ export default function App() {
       if (localByName) {
         openPlaceDetails(localByName);
       } else {
-        handleMoveTo(lat, lon, name);
+        handleMoveTo(lat, lon, name, false, 'suggestion');
       }
       setSearchInput(name);
       setSuggestions([]);
@@ -1515,7 +1697,7 @@ export default function App() {
     if (localMatch) {
       openPlaceDetails(localMatch);
     } else {
-      handleMoveTo(lat, lon, name);
+      handleMoveTo(lat, lon, name, false, 'suggestion');
     }
     setSearchInput(name);
     setSuggestions([]);
@@ -1531,19 +1713,19 @@ export default function App() {
   const executeSearch = async () => {
     if (!searchInput.trim() || loading) return;
 
-    abortControllerRef.current?.abort();
-    abortControllerRef.current = new AbortController();
+    const { controller, requestId } = beginSearchRequest('search_bar');
+    const signal = controller.signal;
 
-    setLoading(true);
     setSystemStatus(T[lang].geocoding);
     setPlaces([]); // Clear immediately 
     
     try {
-      const signal = abortControllerRef.current.signal;
+      debugSearch('coordinates used', { trigger: 'search_bar_pending_geocode', query: searchInput, activeCategory: Array.from(filters), filters: Array.from(filters) });
       const [geoRes, aiRes] = await Promise.allSettled([
         geocodeFree(searchInput, signal),
         aiSearch(`${searchInput} (Context: User Lang: ${lang})`, signal),
       ]);
+      if (isStaleRequest(requestId, signal)) return;
 
       const geo = geoRes.status === 'fulfilled' ? geoRes.value : null;
       const ai = aiRes.status === 'fulfilled' ? aiRes.value : null;
@@ -1571,16 +1753,19 @@ export default function App() {
         if (mapRef.current) mapRef.current.flyTo([lat, lon], 15);
       }
 
-      await fetchWeather(lat, lon);
+      debugSearch('coordinates used', { lat, lon, trigger: 'search_bar', activeCategory: Array.from(filters), filters: Array.from(filters) });
+      await fetchWeather(lat, lon, signal);
       
       // FETCH PLACES WRAPPER
       let osmResults: Place[] = [];
       let bCount = 0;
       try {
-        const fetchResult = await fetchPlaces(lat, lon, false, true);
+        const fetchResult = await fetchPlaces(lat, lon, false, true, signal, requestId);
+        if (isStaleRequest(requestId, signal)) return;
         osmResults = fetchResult.venues;
         bCount = fetchResult.bCount;
       } catch (osmErr: any) {
+        if (osmErr.name === 'AbortError') return;
         console.error("OSM Fetch failed:", osmErr);
         // Continue with AI results if available
       }
@@ -1611,17 +1796,20 @@ export default function App() {
       });
 
       if (uniquePlaces.length === 0) {
-        setLoading(false);
+        setSearchState('empty');
         setSystemStatus('');
+        debugSearch('reason results hidden', { reason: 'empty provider response', lat, lon, bCount });
         return;
       }
 
       // BACKEND CALL FOR SCORING
       setSystemStatus(lang === 'en' ? 'Refining sun scores...' : 'Affinage des scores...');
       try {
+        debugSearch('API request started', { endpoint: '/sun/search', count: uniquePlaces.length });
         const res = await fetch("/sun/search", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
+          signal,
           body: JSON.stringify({
             locations: uniquePlaces,
             date: new Date().toISOString().split('T')[0],
@@ -1634,6 +1822,8 @@ export default function App() {
           })
         });
         const data = await res.json();
+        if (isStaleRequest(requestId, signal)) return;
+        debugSearch('API response count', { endpoint: '/sun/search', count: Array.isArray(data) ? data.length : 0 });
 
         if (Array.isArray(data) && data.length > 0) {
           const finalized = uniquePlaces.map(p => {
@@ -1646,22 +1836,28 @@ export default function App() {
         } else {
           setPlaces(uniquePlaces.sort((a,b) => a.dist - b.dist));
         }
+        setSearchState('success');
       } catch (err) {
+        if ((err as any).name === 'AbortError') return;
         console.error("Backend Scoring failed", err);
         setPlaces(uniquePlaces.sort((a,b) => a.dist - b.dist));
+        setSearchState('success');
       }
 
     } catch (e: any) {
       if (e.name === 'AbortError') return;
       console.error("Search pipeline failed", e);
+      setSearchState('error');
       setSystemStatus(T[lang].locNotFound);
       setTimeout(() => setSystemStatus(''), 3000);
     } finally {
-      setLoading(false);
-      setSystemStatus('');
-      setTimeout(() => {
-        if (mapRef.current) mapRef.current.invalidateSize();
-      }, 400);
+      if (!isStaleRequest(requestId, signal)) {
+        setLoading(false);
+        setSystemStatus('');
+        setTimeout(() => {
+          if (mapRef.current) mapRef.current.invalidateSize();
+        }, 400);
+      }
     }
   };
 
@@ -1696,9 +1892,9 @@ export default function App() {
     }
   };
 
-  const handleGps = () => {
+  const requestDeviceLocation = () => {
     if (!navigator.geolocation) {
-      alert("Geolocation is not supported by your browser");
+      setSystemStatus(lang === 'en' ? 'Location is not available on this browser.' : 'La localisation n’est pas disponible sur ce navigateur.');
       return;
     }
 
@@ -1709,7 +1905,7 @@ export default function App() {
 
     navigator.geolocation.getCurrentPosition(
       (pos) => {
-        handleMoveTo(pos.coords.latitude, pos.coords.longitude, lang === 'en' ? 'Your Location' : 'Votre Position');
+        handleMoveTo(pos.coords.latitude, pos.coords.longitude, lang === 'en' ? 'Your Location' : 'Votre Position', true, 'gps');
         setLocationTimezone(Intl.DateTimeFormat().resolvedOptions().timeZone);
         setIsSearchingGps(false);
         setSystemStatus('');
@@ -1719,7 +1915,7 @@ export default function App() {
         
         navigator.geolocation.getCurrentPosition(
           (pos) => {
-            handleMoveTo(pos.coords.latitude, pos.coords.longitude, lang === 'en' ? 'Your Location' : 'Votre Position');
+            handleMoveTo(pos.coords.latitude, pos.coords.longitude, lang === 'en' ? 'Your Location' : 'Votre Position', true, 'gps');
             setIsSearchingGps(false);
             setSystemStatus('');
           },
@@ -1736,6 +1932,11 @@ export default function App() {
     );
   };
 
+  const handleGps = () => {
+    setLocationFallbackMessage('');
+    setShowLocationPrompt(true);
+  };
+
   const toggleFilter = (f: string) => {
     setFilters(prev => {
       const next = new Set(prev);
@@ -1747,8 +1948,9 @@ export default function App() {
 
   // Initial load
   useEffect(() => {
-    // Restore real geolocation on start as requested
-    handleGps();
+    setHasActiveSearch(false);
+    setSearchState('idle');
+    setShowLocationPrompt(true);
     setPlaces([]);
   }, []);
 
@@ -2114,6 +2316,18 @@ export default function App() {
     { id: 'bar', icon: Beer, lab: lang === 'en' ? 'Bars' : 'Bars' }
   ];
 
+  const placeTypeOptions = [
+    { id: 'cafe' as const, icon: Coffee, label: lang === 'en' ? 'Cafe' : 'Café' },
+    { id: 'bar' as const, icon: Beer, label: lang === 'en' ? 'Bar' : 'Bar' },
+    { id: 'park' as const, icon: Trees, label: lang === 'en' ? 'Park' : 'Parc' },
+  ];
+
+  const yesNoUnknownOptions = [
+    { id: 'unknown', label: lang === 'en' ? 'Unknown' : 'Inconnu' },
+    { id: 'yes', label: lang === 'en' ? 'Yes' : 'Oui' },
+    { id: 'no', label: lang === 'en' ? 'No' : 'Non' },
+  ];
+
   const CompactControlButton = ({
     icon: Icon,
     label,
@@ -2191,9 +2405,14 @@ export default function App() {
             <h1 className={`${isMapCompactMode ? 'text-lg sm:text-xl' : 'text-xl sm:text-2xl'} font-black text-[var(--ink)] tracking-tighter leading-none transition-all duration-300`}>
               Sun Kind{!isMapCompactMode && <span className="text-[var(--amber)]"> — Find the Sun</span>}
             </h1>
-            <span className="text-[9px] sm:text-[10px] font-black uppercase tracking-[0.14em] sm:tracking-[0.2em] text-[var(--ink3)] mt-1 truncate max-w-[64vw] sm:max-w-none">
-              {formatDateHeader(now)}
-            </span>
+            <div className="mt-1 flex items-center gap-2 min-w-0">
+              <span className="text-[9px] sm:text-[10px] font-black uppercase tracking-[0.14em] sm:tracking-[0.2em] text-[var(--ink3)] truncate max-w-[42vw] sm:max-w-none">
+                {formatDateHeader(now)}
+              </span>
+              <span className="shrink-0 rounded-md bg-[var(--ink)]/5 px-1.5 py-0.5 text-[8px] font-black uppercase tracking-widest text-[var(--amber)]">
+                {APP_VERSION_LABEL}
+              </span>
+            </div>
           </div>
           
           <div className={`${isMapCompactMode ? 'hidden sm:flex' : 'flex'} items-center gap-2 sm:gap-3`}>
@@ -2424,6 +2643,14 @@ export default function App() {
             
             <div className="flex gap-1.5 px-3 pb-2 border-t border-[var(--border)] pt-2 overflow-x-auto no-scrollbar">
               {featureFilters.map(f => <FeatureFilterButton key={f.id} f={f} />)}
+              <button
+                type="button"
+                onClick={() => openSeatingSpotSubmit()}
+                className="flex items-center gap-2 rounded-2xl text-[9px] font-black uppercase tracking-widest transition-all shrink-0 px-4 py-2 bg-[var(--amber)] text-white shadow-xl shadow-[var(--amber)]/20"
+              >
+                <Coffee className="w-3 h-3" />
+                <span>{lang === 'en' ? 'Add' : 'Ajouter'}</span>
+              </button>
             </div>
           </div>
         </motion.div>
@@ -2468,7 +2695,7 @@ export default function App() {
         animate={{ 
           y: isMapCompactMode && activeTab === 'map' && !selectedPlace
             ? '76%'
-            : (selectedPlace || activeTab !== 'map' || processedPlaces.length > 0) 
+            : (selectedPlace || activeTab !== 'map' || processedPlaces.length > 0 || hasActiveSearch) 
             ? (selectedPlace ? '15%' : '45%') 
             : '82%' 
         }}
@@ -2527,7 +2754,14 @@ export default function App() {
                 </div>
                 
                 <div className="grid grid-cols-1 gap-1">
-                  {processedPlaces.length > 0 ? (
+                  {loading && hasActiveSearch ? (
+                    <div className="py-20 text-center flex flex-col items-center gap-4">
+                      <Loader2 className="w-8 h-8 animate-spin text-[var(--amber)]" />
+                      <span className="text-[10px] font-black uppercase tracking-[0.2em] text-[var(--ink3)]">
+                        {systemStatus || (lang === 'en' ? 'Searching...' : 'Recherche...')}
+                      </span>
+                    </div>
+                  ) : processedPlaces.length > 0 ? (
                     processedPlaces.map((p, i) => renderPlaceCard(p, i, false))
                   ) : !loading && (
                     <div className="py-20 text-center flex flex-col items-center gap-4">
@@ -2536,11 +2770,26 @@ export default function App() {
                       </div>
                       <div className="flex flex-col gap-1">
                         <span className="text-[11px] font-black uppercase tracking-[0.2em] text-[var(--ink)]">
-                          {lang === 'en' ? 'Where to go?' : 'Où voulez-vous aller ?'}
+                          {!hasActiveSearch
+                            ? (lang === 'en' ? 'Where to go?' : 'Où voulez-vous aller ?')
+                            : searchState === 'error'
+                              ? (lang === 'en' ? 'Search error' : 'Erreur de recherche')
+                              : (lang === 'en' ? 'No results found' : 'Aucun résultat')}
                         </span>
                         <span className="text-[9px] font-medium text-[var(--ink3)] uppercase tracking-widest max-w-[200px]">
-                          {lang === 'en' ? 'Search a city or use GPS to find the sunniest spots.' : 'Recherchez une ville ou utilisez le GPS pour trouver du soleil.'}
+                          {!hasActiveSearch
+                            ? (lang === 'en' ? 'Search a city or use GPS to find the sunniest spots.' : 'Recherchez une ville ou utilisez le GPS pour trouver du soleil.')
+                            : searchState === 'error'
+                              ? (systemStatus || T[lang].searchFailed)
+                              : T[lang].noSpots}
                         </span>
+                        <button
+                          type="button"
+                          onClick={() => openSeatingSpotSubmit()}
+                          className="mt-3 px-5 py-3 rounded-2xl bg-[var(--amber)] text-white text-[10px] font-black uppercase tracking-widest shadow-xl shadow-[var(--amber)]/20"
+                        >
+                          {lang === 'en' ? 'Add' : 'Ajouter'}
+                        </button>
                       </div>
                     </div>
                   )}
@@ -2641,6 +2890,13 @@ export default function App() {
                         <Sun size={14} fill="currentColor" /> Perfect Sun
                       </button>
                     </div>
+                    <button
+                      type="button"
+                      onClick={() => openSeatingSpotSubmit(selectedPlace)}
+                      className="mt-3 w-full py-4 bg-[var(--amber)] text-white rounded-2xl font-black text-[10px] uppercase tracking-widest transition-all shadow-xl shadow-[var(--amber)]/20 flex items-center justify-center gap-2"
+                    >
+                      <Coffee size={14} /> {lang === 'en' ? 'Add seating spot' : 'Ajouter une place dehors'}
+                    </button>
                   </div>
                 ) : (
                   <div className="space-y-4 mb-4">
@@ -2653,14 +2909,32 @@ export default function App() {
                 
                 {/* Full list always clickable or scrollable below */}
                 <div className="space-y-4">
-                   {processedPlaces.length > 0 ? (
+                   {loading && hasActiveSearch ? (
+                     <div className="py-20 text-center flex flex-col items-center gap-4">
+                       <Loader2 className="w-8 h-8 animate-spin text-[var(--amber)]" />
+                       <span className="text-[10px] font-black uppercase tracking-[0.2em] text-[var(--ink3)]">
+                         {systemStatus || (lang === 'en' ? 'Searching...' : 'Recherche...')}
+                       </span>
+                     </div>
+                   ) : processedPlaces.length > 0 ? (
                      processedPlaces.map((p, i) => renderPlaceCard(p, i, true))
                    ) : !loading && !selectedPlace && (
                      <div className="py-20 text-center flex flex-col items-center gap-4 opacity-30">
                        <SunMedium className="w-12 h-12" />
                        <span className="text-[10px] font-black uppercase tracking-[0.2em] max-w-[250px]">
-                         {lang === 'en' ? 'No sunny terraces nearby right now. Check back later ☁️' : 'Aucune terrasse ensoleillée à proximité pour le moment. Revenez plus tard ☁️'}
+                         {!hasActiveSearch
+                           ? (lang === 'en' ? 'Search or use location to show nearby spots.' : 'Recherchez ou utilisez la position pour afficher les lieux.')
+                           : searchState === 'error'
+                             ? T[lang].searchFailed
+                             : T[lang].noSpots}
                        </span>
+                       <button
+                         type="button"
+                         onClick={() => openSeatingSpotSubmit()}
+                         className="px-5 py-3 rounded-2xl bg-[var(--amber)] text-white text-[10px] font-black uppercase tracking-widest shadow-xl shadow-[var(--amber)]/20 opacity-100"
+                       >
+                         {lang === 'en' ? 'Add' : 'Ajouter'}
+                       </button>
                      </div>
                    )}
                 </div>
@@ -2761,6 +3035,336 @@ export default function App() {
                 <div className="w-2 h-2 bg-orange-500 rounded-full animate-pulse" />
                 {T[lang].simMode}: {formatLocalTime(now)}
              </div>
+          </motion.div>
+        )}
+        {positionPickerTarget && (
+          <motion.div
+            initial={{ opacity: 0, y: -16 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -16 }}
+            className="fixed top-28 left-1/2 -translate-x-1/2 z-[6000] w-[calc(100%-2rem)] max-w-sm"
+          >
+            <div className="bg-[var(--ink)] text-white rounded-3xl shadow-2xl p-4 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-3 min-w-0">
+                <MapPin size={18} className="text-[var(--amber)] shrink-0" />
+                <span className="text-[10px] font-black uppercase tracking-widest">
+                  {positionPickerTarget === 'seating'
+                    ? (lang === 'en' ? 'Double-click exact outdoor seating point' : 'Double-cliquez le point exact dehors')
+                    : (lang === 'en' ? 'Double-click the place location' : 'Double-cliquez la position du lieu')}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setPositionPickerTarget(null);
+                  setShowCafeSubmit(true);
+                }}
+                className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center shrink-0"
+              >
+                <X size={15} />
+              </button>
+            </div>
+          </motion.div>
+        )}
+        {showLocationPrompt && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[10001] bg-black/45 backdrop-blur-sm flex items-end sm:items-center justify-center p-3 sm:p-4"
+          >
+            <motion.div
+              initial={{ y: 16, scale: 0.98 }}
+              animate={{ y: 0, scale: 1 }}
+              exit={{ y: 16, scale: 0.98 }}
+              className="w-full max-w-sm rounded-[28px] bg-white shadow-2xl border border-[var(--border)] overflow-hidden"
+            >
+              <div className="p-5">
+                <div className="flex items-center gap-3">
+                  <div className="w-11 h-11 rounded-2xl bg-[var(--amber)]/10 text-[var(--amber)] flex items-center justify-center">
+                    <Navigation size={20} />
+                  </div>
+                  <div className="min-w-0">
+                    <div className="text-[10px] font-black uppercase tracking-[0.2em] text-[var(--ink3)]">
+                      Sunkind
+                    </div>
+                    <h2 className="text-lg font-black text-[var(--ink)] tracking-tight leading-tight">
+                      {lang === 'en' ? 'Allow Sunkind to use your location?' : 'Autoriser Sunkind à utiliser votre position ?'}
+                    </h2>
+                  </div>
+                </div>
+
+                <p className="mt-3 text-sm text-[var(--ink2)] leading-relaxed">
+                  {lang === 'en'
+                    ? 'This helps set your current location precisely. If you choose No, Sunkind will use your detected region or the default location.'
+                    : 'Cela aide à définir votre position actuelle avec précision. Si vous choisissez Non, Sunkind utilisera votre région détectée ou la position par défaut.'}
+                </p>
+
+                {locationFallbackMessage && (
+                  <div className="mt-3 rounded-2xl bg-[var(--cream)] border border-[var(--border)] px-3 py-2 text-xs font-semibold text-[var(--ink2)]">
+                    {locationFallbackMessage}
+                  </div>
+                )}
+
+                <div className="mt-5 grid grid-cols-2 gap-3">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowLocationPrompt(false);
+                      requestDeviceLocation();
+                    }}
+                    className="h-12 rounded-2xl bg-[var(--amber)] text-white text-[10px] font-black uppercase tracking-widest"
+                  >
+                    {lang === 'en' ? 'Yes' : 'Oui'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowLocationPrompt(false);
+                      setIsSearchingGps(false);
+                      setLocationFallbackMessage(
+                        lang === 'en'
+                          ? 'Using your detected region and the default location.'
+                          : 'Utilisation de la région détectée et de la position par défaut.'
+                      );
+                      setSystemStatus('');
+                    }}
+                    className="h-12 rounded-2xl bg-[var(--cream)] border border-[var(--border)] text-[var(--ink2)] text-[10px] font-black uppercase tracking-widest"
+                  >
+                    {lang === 'en' ? 'No' : 'Non'}
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+        {showCafeSubmit && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[10000] bg-black/70 backdrop-blur-xl flex items-center justify-center p-4"
+          >
+            <motion.div
+              initial={{ scale: 0.96, y: 18 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.96, y: 18 }}
+              className="w-full max-w-md max-h-[90vh] bg-white rounded-3xl shadow-2xl border border-[var(--border)] overflow-y-auto"
+            >
+              <div className="p-5 border-b border-[var(--border)] flex items-center justify-between">
+                <div>
+                  <h2 className="text-xl font-black text-[var(--ink)] tracking-tight">
+                    {lang === 'en' ? 'Add your places' : 'Ajouter vos lieux'}
+                  </h2>
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-[var(--ink3)] mt-1">
+                    {lang === 'en' ? 'For missing places on the map' : 'Pour les lieux absents de la carte'}
+                  </p>
+                </div>
+                <button
+                  onClick={() => setShowCafeSubmit(false)}
+                  className="w-10 h-10 rounded-2xl bg-[var(--cream)] flex items-center justify-center text-[var(--ink2)]"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              <form onSubmit={submitCafeSuggestion} className="p-5 space-y-4">
+                <div>
+                  <span className="text-[9px] font-black uppercase tracking-widest text-[var(--ink3)]">
+                    {lang === 'en' ? 'Place type' : 'Type de lieu'}
+                  </span>
+                  <div className="mt-1 grid grid-cols-3 gap-2">
+                    {placeTypeOptions.map(option => (
+                      <button
+                        key={option.id}
+                        type="button"
+                        onClick={() => setPlaceSubmitType(option.id)}
+                        className={`h-11 rounded-2xl flex items-center justify-center gap-2 text-[9px] font-black uppercase transition-all ${
+                          placeSubmitType === option.id
+                            ? 'bg-[var(--amber)] text-white shadow-lg shadow-[var(--amber)]/20'
+                            : 'bg-[var(--cream)] text-[var(--ink3)] border border-[var(--border)]'
+                        }`}
+                      >
+                        <option.icon size={14} />
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <label className="block">
+                  <span className="text-[9px] font-black uppercase tracking-widest text-[var(--ink3)]">
+                    {lang === 'en' ? 'Place name' : 'Nom du lieu'}
+                  </span>
+                  <div className="mt-1 h-12 rounded-2xl border border-[var(--border)] bg-[var(--cream)] px-4 flex items-center gap-3">
+                    <Coffee size={16} className="text-[var(--ink3)]" />
+                    <input
+                      type="text"
+                      value={cafeSubmitName}
+                      onChange={(e) => setCafeSubmitName(e.target.value)}
+                      className="w-full bg-transparent outline-none text-sm font-bold text-[var(--ink)]"
+                      placeholder={lang === 'en' ? 'Cafe, bar, park...' : 'Café, bar, parc...'}
+                      required
+                    />
+                  </div>
+                </label>
+
+                <div>
+                  <span className="text-[9px] font-black uppercase tracking-widest text-[var(--ink3)]">
+                    {lang === 'en' ? 'Place position' : 'Position du lieu'}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowCafeSubmit(false);
+                      setActiveTab('map');
+                      setPositionPickerTarget('place');
+                      setTimeout(() => mapRef.current?.invalidateSize(), 100);
+                    }}
+                    className={`mt-1 w-full min-h-12 rounded-2xl border px-4 py-3 flex items-center justify-between gap-3 text-left transition-all ${
+                      placeSubmitPosition
+                        ? 'border-[var(--amber)] bg-[var(--amber)]/5 text-[var(--ink)]'
+                        : 'border-[var(--border)] bg-[var(--cream)] text-[var(--ink3)]'
+                    }`}
+                  >
+                    <span className="flex items-center gap-3 min-w-0">
+                      <MapPin size={16} className="shrink-0 text-[var(--amber)]" />
+                      <span className="text-xs font-black uppercase tracking-widest truncate">
+                        {placeSubmitPosition
+                          ? `${placeSubmitPosition.lat.toFixed(5)}, ${placeSubmitPosition.lon.toFixed(5)}`
+                          : (lang === 'en' ? 'Choose place location' : 'Choisir la position du lieu')}
+                      </span>
+                    </span>
+                    <ChevronRight size={16} className="shrink-0" />
+                  </button>
+                </div>
+
+                <div>
+                  <span className="text-[9px] font-black uppercase tracking-widest text-[var(--ink3)]">
+                    {lang === 'en' ? 'Exact outdoor seat point' : 'Point exact des places dehors'}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowCafeSubmit(false);
+                      setActiveTab('map');
+                      setPositionPickerTarget('seating');
+                      setTimeout(() => mapRef.current?.invalidateSize(), 100);
+                    }}
+                    className={`mt-1 w-full min-h-12 rounded-2xl border px-4 py-3 flex items-center justify-between gap-3 text-left transition-all ${
+                      seatingSpotPosition
+                        ? 'border-[var(--amber)] bg-[var(--amber)]/5 text-[var(--ink)]'
+                        : 'border-[var(--border)] bg-[var(--cream)] text-[var(--ink3)]'
+                    }`}
+                  >
+                    <span className="flex items-center gap-3 min-w-0">
+                      <MapPin size={16} className="shrink-0 text-[var(--amber)]" />
+                      <span className="text-xs font-black uppercase tracking-widest truncate">
+                        {seatingSpotPosition
+                          ? `${seatingSpotPosition.lat.toFixed(5)}, ${seatingSpotPosition.lon.toFixed(5)}`
+                          : (lang === 'en' ? 'Where exactly can people sit outside?' : 'Où peut-on s’asseoir dehors exactement ?')}
+                      </span>
+                    </span>
+                    <ChevronRight size={16} className="shrink-0" />
+                  </button>
+                </div>
+
+                <div className="rounded-2xl border border-[var(--border)] bg-[var(--cream)] overflow-hidden">
+                  <button
+                    type="button"
+                    onClick={() => setShowPlaceMoreDetails(open => !open)}
+                    className="w-full h-12 px-4 flex items-center justify-between text-left"
+                  >
+                    <span className="text-[9px] font-black uppercase tracking-widest text-[var(--ink3)]">
+                      {lang === 'en' ? 'More details' : 'Plus de détails'}
+                    </span>
+                    <ChevronRight size={16} className={`text-[var(--ink3)] transition-transform ${showPlaceMoreDetails ? 'rotate-90' : ''}`} />
+                  </button>
+
+                  {showPlaceMoreDetails && (
+                    <div className="px-4 pb-4 space-y-4 border-t border-[var(--border)]">
+                      <label className="block pt-4">
+                        <span className="text-[9px] font-black uppercase tracking-widest text-[var(--ink3)]">
+                          {lang === 'en' ? 'Outdoor seating' : 'Places dehors'}
+                        </span>
+                        <select
+                          value={outdoorSeating}
+                          onChange={(e) => setOutdoorSeating(e.target.value as typeof outdoorSeating)}
+                          className="mt-1 h-12 w-full rounded-2xl border border-[var(--border)] bg-white px-4 outline-none text-sm font-bold text-[var(--ink)]"
+                        >
+                          {yesNoUnknownOptions.map(option => (
+                            <option key={option.id} value={option.id}>{option.label}</option>
+                          ))}
+                        </select>
+                      </label>
+
+                      <label className="block">
+                        <span className="text-[9px] font-black uppercase tracking-widest text-[var(--ink3)]">
+                          {lang === 'en' ? 'Seating type' : 'Type de places'}
+                        </span>
+                        <select
+                          value={spotType}
+                          onChange={(e) => setSpotType(e.target.value)}
+                          className="mt-1 h-12 w-full rounded-2xl border border-[var(--border)] bg-white px-4 outline-none text-sm font-bold text-[var(--ink)]"
+                        >
+                          <option value="unknown">{lang === 'en' ? 'Unknown' : 'Inconnu'}</option>
+                          <option value="street_terrace">{lang === 'en' ? 'Street terrace' : 'Terrasse rue'}</option>
+                          <option value="courtyard">{lang === 'en' ? 'Courtyard' : 'Cour'}</option>
+                          <option value="rooftop">{lang === 'en' ? 'Rooftop' : 'Toit'}</option>
+                          <option value="garden">{lang === 'en' ? 'Garden' : 'Jardin'}</option>
+                          <option value="park_table">{lang === 'en' ? 'Public bench/table' : 'Banc/table public'}</option>
+                        </select>
+                      </label>
+
+                      <label className="block">
+                        <span className="text-[9px] font-black uppercase tracking-widest text-[var(--ink3)]">
+                          {lang === 'en' ? 'Shade source' : 'Source d’ombre'}
+                        </span>
+                        <select
+                          value={shadeSource}
+                          onChange={(e) => setShadeSource(e.target.value)}
+                          className="mt-1 h-12 w-full rounded-2xl border border-[var(--border)] bg-white px-4 outline-none text-sm font-bold text-[var(--ink)]"
+                        >
+                          <option value="unknown">{lang === 'en' ? 'Unknown' : 'Inconnu'}</option>
+                          <option value="building">{lang === 'en' ? 'Building' : 'Bâtiment'}</option>
+                          <option value="tree">{lang === 'en' ? 'Tree' : 'Arbre'}</option>
+                          <option value="umbrella">{lang === 'en' ? 'Umbrella' : 'Parasol'}</option>
+                          <option value="awning">{lang === 'en' ? 'Awning' : 'Store'}</option>
+                          <option value="none">{lang === 'en' ? 'None' : 'Aucune'}</option>
+                        </select>
+                      </label>
+
+                      <label className="block">
+                        <span className="text-[9px] font-black uppercase tracking-widest text-[var(--ink3)]">
+                          {lang === 'en' ? 'Note' : 'Note'}
+                        </span>
+                        <textarea
+                          value={cafeSubmitNote}
+                          onChange={(e) => setCafeSubmitNote(e.target.value)}
+                          className="mt-1 min-h-24 w-full rounded-2xl border border-[var(--border)] bg-white px-4 py-3 outline-none text-sm font-bold text-[var(--ink)] resize-none"
+                          placeholder={lang === 'en' ? 'Optional details...' : 'Détails optionnels...'}
+                        />
+                      </label>
+                    </div>
+                  )}
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={cafeSubmitLoading}
+                  className="w-full h-12 rounded-2xl bg-[var(--amber)] text-white text-[10px] font-black uppercase tracking-widest flex items-center justify-center gap-2 disabled:opacity-60"
+                >
+                  {cafeSubmitLoading && <Loader2 size={15} className="animate-spin" />}
+                  {lang === 'en' ? 'Submit seating spot' : 'Envoyer la zone assise'}
+                </button>
+
+                <p className="text-[10px] font-semibold leading-relaxed text-[var(--ink3)]">
+                  {lang === 'en'
+                    ? 'New seating spots start unverified. Hidden spots are not shown on the map.'
+                    : 'Nous gardons cela comme demande de vérification avant de l’afficher comme lieu.'}
+                </p>
+              </form>
+            </motion.div>
           </motion.div>
         )}
         {showPaywall && (

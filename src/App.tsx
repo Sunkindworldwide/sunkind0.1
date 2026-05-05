@@ -203,6 +203,7 @@ export default function App() {
   const [isWeatherExpanded, setIsWeatherExpanded] = useState(false);
   const [isMapCompactMode, setIsMapCompactMode] = useState(false);
   const [isMapSectionActive, setIsMapSectionActive] = useState(false);
+  const [sheetMode, setSheetMode] = useState<'collapsed' | 'peek' | 'expanded'>('collapsed');
 
   // Fetch live signals
   useEffect(() => {
@@ -305,6 +306,25 @@ export default function App() {
       setTimeout(() => mapRef.current?.invalidateSize(), 220);
     }
   }, [isMapCompactMode]);
+
+  useEffect(() => {
+    if (selectedPlace) {
+      setSheetMode('expanded');
+      return;
+    }
+
+    if (activeTab !== 'map') {
+      setSheetMode('peek');
+      return;
+    }
+
+    if (hasActiveSearch || processedPlaces.length > 0) {
+      setSheetMode('peek');
+      return;
+    }
+
+    setSheetMode('collapsed');
+  }, [activeTab, hasActiveSearch, processedPlaces.length, selectedPlace]);
 
   const submitSignal = async (placeId: number | string, feedback: string) => {
     if (!isSupabaseConfigured) {
@@ -2381,6 +2401,39 @@ export default function App() {
   };
 
   const showExpandedControls = !isMapCompactMode;
+  const getSheetY = () => {
+    if (selectedPlace) return '15%';
+    if (sheetMode === 'expanded') return activeTab === 'map' ? '18%' : '15%';
+    if (sheetMode === 'peek') return activeTab === 'map' ? '45%' : '45%';
+    if (activeTab === 'map') return isMapCompactMode ? '76%' : '82%';
+    return '45%';
+  };
+
+  const settleSheet = (_: unknown, info: { offset: { y: number }; velocity: { y: number } }) => {
+    if (selectedPlace) {
+      setSheetMode('expanded');
+      return;
+    }
+
+    if (activeTab !== 'map') {
+      if (info.offset.y < -80 || info.velocity.y < -250) setSheetMode('expanded');
+      else if (info.offset.y > 80 || info.velocity.y > 250) setSheetMode('peek');
+      else setSheetMode('peek');
+      return;
+    }
+
+    if (info.offset.y < -120 || info.velocity.y < -300) {
+      setSheetMode('expanded');
+      return;
+    }
+
+    if (info.offset.y > 140 || info.velocity.y > 300) {
+      setSheetMode('collapsed');
+      return;
+    }
+
+    setSheetMode(hasActiveSearch || processedPlaces.length > 0 ? 'peek' : 'collapsed');
+  };
 
   return (
     <div className={`relative h-screen w-full overflow-hidden bg-[var(--cream)] ${isMapCompactMode ? 'map-compact-mode' : ''}`}>
@@ -2692,13 +2745,8 @@ export default function App() {
         dragConstraints={{ top: 80, bottom: 950 }}
         dragElastic={0.1}
         initial={{ y: '90%' }}
-        animate={{ 
-          y: isMapCompactMode && activeTab === 'map' && !selectedPlace
-            ? '76%'
-            : (selectedPlace || activeTab !== 'map' || processedPlaces.length > 0 || hasActiveSearch) 
-            ? (selectedPlace ? '15%' : '45%') 
-            : '82%' 
-        }}
+        animate={{ y: getSheetY() }}
+        onDragEnd={settleSheet}
         transition={{ type: 'spring', damping: 30, stiffness: 150 }}
         className="absolute inset-x-0 bottom-0 z-[1001] pointer-events-none pt-[100px] sm:pt-[120px]"
       >

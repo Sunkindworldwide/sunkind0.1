@@ -3,10 +3,6 @@
     {
       "source": "/sun/search",
       "destination": "/api/sun/search"
-    },
-    {
-      "source": "/(.*)",
-      "destination": "/index.html"
     }
   ]
 }

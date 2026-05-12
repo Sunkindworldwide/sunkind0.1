@@ -22,7 +22,7 @@ export interface StructuredOsmData {
  * Fetches cafes/restaurants, quality outdoor spots, and nearby building footprints.
  * Optimized with local caching and fast server selection.
  */
-export async function fetchShadowData(lat: number, lon: number, radius: number = 800): Promise<StructuredOsmData> {
+export async function fetchShadowData(lat: number, lon: number, radius: number = 800, signal?: AbortSignal): Promise<StructuredOsmData> {
   // 1. Validation to prevent HTTP 400 from NaN coordinates
   if (isNaN(lat) || isNaN(lon)) {
     console.error("fetchShadowData called with NaN coordinates", { lat, lon });
@@ -70,6 +70,7 @@ out center geom;`;
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({ query }),
+      signal,
     });
 
     if (!response.ok) {

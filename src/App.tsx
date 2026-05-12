@@ -24,10 +24,11 @@ import { calculateShadow, calculateSunlightScore, ShadowResult } from './service
 import * as turf from '@turf/turf';
 import { getSunDecision } from './services/decisionService';
 import ReactMarkdown from 'react-markdown';
+import scrollUpMarkdown from './content/scroll-up-system.md?raw';
 
 const DEFAULT_LOC = { lat: 48.8566, lon: 2.3522, name: 'Search for sun...' };
 type SearchState = 'idle' | 'searching' | 'success' | 'empty' | 'error';
-const APP_VERSION_LABEL = 'UX Merge 2026-05-05';
+type CompactFeature = 'search' | 'weather' | 'time' | 'filters' | 'add' | 'analysis' | null;
 
 const T = {
   en: {
@@ -203,7 +204,7 @@ export default function App() {
   const [isWeatherExpanded, setIsWeatherExpanded] = useState(false);
   const [isMapCompactMode, setIsMapCompactMode] = useState(false);
   const [isMapSectionActive, setIsMapSectionActive] = useState(false);
-  const [sheetMode, setSheetMode] = useState<'collapsed' | 'peek' | 'expanded'>('collapsed');
+  const [activeFeature, setActiveFeature] = useState<CompactFeature>(null);
 
   // Fetch live signals
   useEffect(() => {
@@ -267,16 +268,12 @@ export default function App() {
 
   useEffect(() => {
     const mapIsUsableView = isMapSectionActive && (activeTab === 'map' || activeTab === 'list') && !selectedPlace;
-    if (!mapIsUsableView) {
-      setIsMapCompactMode(false);
-      return;
-    }
+    if (!mapIsUsableView || isMapCompactMode) return;
 
     let touchStartY = 0;
 
     const handleWheel = (event: WheelEvent) => {
       if (event.deltaY > 8) setIsMapCompactMode(true);
-      if (event.deltaY < -8) setIsMapCompactMode(false);
     };
 
     const handleTouchStart = (event: TouchEvent) => {
@@ -287,7 +284,6 @@ export default function App() {
       const currentY = event.touches[0]?.clientY ?? touchStartY;
       const delta = touchStartY - currentY;
       if (delta > 18) setIsMapCompactMode(true);
-      if (delta < -18) setIsMapCompactMode(false);
     };
 
     window.addEventListener('wheel', handleWheel, { passive: true });
@@ -299,32 +295,13 @@ export default function App() {
       window.removeEventListener('touchstart', handleTouchStart);
       window.removeEventListener('touchmove', handleTouchMove);
     };
-  }, [activeTab, isMapSectionActive, selectedPlace]);
+  }, [activeTab, isMapCompactMode, isMapSectionActive, selectedPlace]);
 
   useEffect(() => {
     if (mapRef.current) {
       setTimeout(() => mapRef.current?.invalidateSize(), 220);
     }
-  }, [isMapCompactMode]);
-
-  useEffect(() => {
-    if (selectedPlace) {
-      setSheetMode('expanded');
-      return;
-    }
-
-    if (activeTab !== 'map') {
-      setSheetMode('peek');
-      return;
-    }
-
-    if (hasActiveSearch || processedPlaces.length > 0) {
-      setSheetMode('peek');
-      return;
-    }
-
-    setSheetMode('collapsed');
-  }, [activeTab, hasActiveSearch, processedPlaces.length, selectedPlace]);
+  }, [activeFeature, isMapCompactMode]);
 
   const submitSignal = async (placeId: number | string, feedback: string) => {
     if (!isSupabaseConfigured) {
@@ -1124,7 +1101,7 @@ export default function App() {
       }).filter((p): p is NonNullable<typeof p> => !!p);
 
       // 2. Filter Display Logic
-      const filtered = enriched.filter(p => p && p.type && filters.has(p.type));
+      const filtered = enriched.filter(p => p && p.type && (!filters.size || filters.has(p.type)));
 
       // User selectable sort mode
       const sorted = [...filtered].sort((a, b) => {
@@ -1495,7 +1472,7 @@ export default function App() {
       return { venues: [], bCount: 0 };
     }
 
-    const cacheKey = `v5:${lat.toFixed(3)},${lon.toFixed(3)}`;
+    const cacheKey = `v6:${lat.toFixed(3)},${lon.toFixed(3)}:${Array.from(filters).sort().join('|')}`;
     if (!force && cacheRef.current[cacheKey]) {
       debugSearch('cache hit', { cacheKey, count: cacheRef.current[cacheKey].length });
       if (!skipState && !isStaleRequest(requestId, signal)) setPlaces(cacheRef.current[cacheKey]);
@@ -1516,24 +1493,24 @@ export default function App() {
     debugSearch('API request started', { lat, lon, activeCategory: Array.from(filters), filters: Array.from(filters) });
 
     try {
-      let data = await fetchShadowData(lat, lon, 1500);
       let sourceRadius = 1500;
+      if (mapRef.current) {
+        const bounds = mapRef.current.getBounds();
+        const visibleRadius = getDistance(lat, lon, bounds.getNorthEast().lat, bounds.getNorthEast().lng);
+        sourceRadius = Math.max(1200, Math.min(3500, Math.round(visibleRadius)));
+      }
+      let data = await fetchShadowData(lat, lon, sourceRadius, signal);
       const countQualityParks = (items: OsmElement[]) => items.filter(el => {
         const tags = el.tags || {};
         const category = getCategoryQuality(tags);
         return category >= 45;
       }).length;
 
-      if (countQualityParks(data.venues) < 6) {
-        const expanded = await fetchShadowData(lat, lon, 5000);
-        data = { venues: expanded.venues, buildings: data.buildings.length ? data.buildings : expanded.buildings };
-        sourceRadius = 5000;
-      }
-
       if (countQualityParks(data.venues) < 4) {
-        const expanded = await fetchShadowData(lat, lon, 10000);
+        const expandedRadius = Math.max(sourceRadius, 4500);
+        const expanded = await fetchShadowData(lat, lon, expandedRadius, signal);
         data = { venues: expanded.venues, buildings: data.buildings.length ? data.buildings : expanded.buildings };
-        sourceRadius = 10000;
+        sourceRadius = expandedRadius;
       }
       if (isStaleRequest(requestId, signal)) return { venues: [], bCount: 0 };
       
@@ -2376,6 +2353,10 @@ export default function App() {
     </button>
   );
 
+  const toggleActiveFeature = (feature: Exclude<CompactFeature, null>) => {
+    setActiveFeature(current => current === feature ? null : feature);
+  };
+
   const FeatureFilterButton = ({ f, compact = false }: { f: typeof featureFilters[number]; compact?: boolean }) => (
     <button
       key={f.id}
@@ -2395,45 +2376,50 @@ export default function App() {
     </button>
   );
 
-  const exitCompactControls = () => {
-    setIsMapCompactMode(false);
-    setTimeout(() => mapRef.current?.invalidateSize(), 240);
-  };
-
   const showExpandedControls = !isMapCompactMode;
-  const getSheetY = () => {
-    if (selectedPlace) return '15%';
-    if (sheetMode === 'expanded') return activeTab === 'map' ? '18%' : '15%';
-    if (sheetMode === 'peek') return activeTab === 'map' ? '45%' : '45%';
-    if (activeTab === 'map') return isMapCompactMode ? '76%' : '82%';
-    return '45%';
-  };
-
-  const settleSheet = (_: unknown, info: { offset: { y: number }; velocity: { y: number } }) => {
-    if (selectedPlace) {
-      setSheetMode('expanded');
-      return;
-    }
-
-    if (activeTab !== 'map') {
-      if (info.offset.y < -80 || info.velocity.y < -250) setSheetMode('expanded');
-      else if (info.offset.y > 80 || info.velocity.y > 250) setSheetMode('peek');
-      else setSheetMode('peek');
-      return;
-    }
-
-    if (info.offset.y < -120 || info.velocity.y < -300) {
-      setSheetMode('expanded');
-      return;
-    }
-
-    if (info.offset.y > 140 || info.velocity.y > 300) {
-      setSheetMode('collapsed');
-      return;
-    }
-
-    setSheetMode(hasActiveSearch || processedPlaces.length > 0 ? 'peek' : 'collapsed');
-  };
+  const compactFeatureButtons: Array<{
+    feature: Exclude<CompactFeature, null>;
+    icon: React.ElementType;
+    label: string;
+    ariaLabel: string;
+  }> = [
+    {
+      feature: 'search',
+      icon: Search,
+      label: lang === 'en' ? 'Search' : 'Recherche',
+      ariaLabel: lang === 'en' ? 'Toggle search controls' : 'Afficher ou masquer les contrôles de recherche',
+    },
+    {
+      feature: 'weather',
+      icon: Cloud,
+      label: lang === 'en' ? 'Weather' : 'Météo',
+      ariaLabel: lang === 'en' ? 'Toggle weather controls' : 'Afficher ou masquer les contrôles météo',
+    },
+    {
+      feature: 'time',
+      icon: Clock,
+      label: formatLocalTime(now),
+      ariaLabel: lang === 'en' ? 'Toggle time controls' : 'Afficher ou masquer les contrôles horaires',
+    },
+    {
+      feature: 'filters',
+      icon: LayoutDashboard,
+      label: lang === 'en' ? 'Places' : 'Lieux',
+      ariaLabel: lang === 'en' ? 'Toggle place filter controls' : 'Afficher ou masquer les filtres de lieux',
+    },
+    {
+      feature: 'add',
+      icon: Coffee,
+      label: lang === 'en' ? 'Add' : 'Ajouter',
+      ariaLabel: lang === 'en' ? 'Toggle add place controls' : 'Afficher ou masquer les contrôles ajout de lieu',
+    },
+    {
+      feature: 'analysis',
+      icon: Sparkles,
+      label: lang === 'en' ? 'Analysis' : 'Analyse',
+      ariaLabel: lang === 'en' ? 'Toggle scroll-up document' : 'Afficher ou masquer le document',
+    },
+  ];
 
   return (
     <div className={`relative h-screen w-full overflow-hidden bg-[var(--cream)] ${isMapCompactMode ? 'map-compact-mode' : ''}`}>
@@ -2444,31 +2430,63 @@ export default function App() {
       </div>
 
       {/* 2. LAYER: TOP BRANDING & SEARCH OVERLAY */}
-      <div className="absolute top-0 inset-x-0 z-[1000] pointer-events-none p-3 sm:p-4 md:p-6 flex flex-col gap-3 md:gap-4 max-h-[calc(100dvh-6rem)] overflow-visible">
+      <div className={`absolute top-0 inset-x-0 z-[1000] pointer-events-none p-3 sm:p-4 md:p-6 flex flex-col gap-3 md:gap-4 overflow-visible ${isMapCompactMode ? 'max-h-[58dvh] sm:max-h-[52dvh]' : 'max-h-[calc(100dvh-6rem)]'}`}>
         <motion.div 
           initial={{ y: -50, opacity: 0 }}
           animate={{ y: 0, opacity: 1 }}
-          className={`w-full flex items-center justify-between pointer-events-auto transition-all duration-300 ${
+          className={`w-full pointer-events-auto transition-all duration-300 ${
             isMapCompactMode
-              ? 'max-w-full sm:max-w-xl md:max-w-sm glass rounded-[1.5rem] px-3 py-2 shadow-2xl'
-              : ''
+              ? 'max-w-full sm:max-w-2xl md:max-w-3xl glass rounded-[1.5rem] px-3 py-2 shadow-2xl'
+              : 'flex items-center justify-between'
           }`}
         >
-          <div className="flex flex-col">
-            <h1 className={`${isMapCompactMode ? 'text-lg sm:text-xl' : 'text-xl sm:text-2xl'} font-black text-[var(--ink)] tracking-tighter leading-none transition-all duration-300`}>
-              Sun Kind{!isMapCompactMode && <span className="text-[var(--amber)]"> — Find the Sun</span>}
-            </h1>
-            <div className="mt-1 flex items-center gap-2 min-w-0">
-              <span className="text-[9px] sm:text-[10px] font-black uppercase tracking-[0.14em] sm:tracking-[0.2em] text-[var(--ink3)] truncate max-w-[42vw] sm:max-w-none">
-                {formatDateHeader(now)}
-              </span>
-              <span className="shrink-0 rounded-md bg-[var(--ink)]/5 px-1.5 py-0.5 text-[8px] font-black uppercase tracking-widest text-[var(--amber)]">
-                {APP_VERSION_LABEL}
-              </span>
+          {isMapCompactMode ? (
+            <div className="flex flex-col sm:flex-row sm:items-center gap-2 w-full">
+              <div className="grid grid-cols-2 gap-1 rounded-2xl bg-black/[0.04] p-1 border border-black/5 shrink-0">
+                <button
+                  type="button"
+                  aria-label={lang === 'en' ? 'Select sun mode' : 'Choisir le mode soleil'}
+                  onClick={() => setMode('sun')}
+                  className={`h-10 px-3 rounded-xl flex items-center justify-center gap-2 text-[10px] font-black uppercase transition-all ${mode === 'sun' ? 'bg-[var(--ink)] text-white shadow-lg' : 'text-[var(--ink3)]'}`}
+                >
+                  <Sun size={15} /> {lang === 'en' ? 'Sun' : 'Soleil'}
+                </button>
+                <button
+                  type="button"
+                  aria-label={lang === 'en' ? 'Select shade mode' : 'Choisir le mode ombre'}
+                  onClick={() => setMode('shade')}
+                  className={`h-10 px-3 rounded-xl flex items-center justify-center gap-2 text-[10px] font-black uppercase transition-all ${mode === 'shade' ? 'bg-[var(--ink)] text-white shadow-lg' : 'text-[var(--ink3)]'}`}
+                >
+                  <Moon size={15} /> {lang === 'en' ? 'Shade' : 'Ombre'}
+                </button>
+              </div>
+              <button
+                type="button"
+                aria-label={lang === 'en' ? 'Open date and time controls' : 'Ouvrir les contrôles date et heure'}
+                onClick={() => toggleActiveFeature('time')}
+                className={`h-11 px-4 rounded-2xl border flex items-center justify-between gap-3 text-left transition-all min-w-0 sm:flex-1 ${activeFeature === 'time' ? 'bg-[var(--ink)] text-white border-transparent shadow-xl' : 'bg-white/80 text-[var(--ink2)] border-[var(--border)]'}`}
+              >
+                <Clock size={16} className="shrink-0" />
+                <span className="min-w-0 flex-1">
+                  <span className="block text-[9px] font-black uppercase tracking-widest opacity-70">{formatLocalTime(now)}</span>
+                  <span className="block text-[11px] font-black truncate">{formatDateHeader(now)}</span>
+                </span>
+              </button>
             </div>
-          </div>
+          ) : (
+            <>
+              <div className="flex flex-col">
+                <h1 className="text-xl sm:text-2xl font-black text-[var(--ink)] tracking-tighter leading-none transition-all duration-300">
+                  Sun Kind<span className="text-[var(--amber)]"> — Find the Sun</span>
+                </h1>
+                <span className="text-[9px] sm:text-[10px] font-black uppercase tracking-[0.14em] sm:tracking-[0.2em] text-[var(--ink3)] mt-1 truncate max-w-[64vw] sm:max-w-none">
+                  {formatDateHeader(now)}
+                </span>
+              </div>
+            </>
+          )}
           
-          <div className={`${isMapCompactMode ? 'hidden sm:flex' : 'flex'} items-center gap-2 sm:gap-3`}>
+          <div className={`${isMapCompactMode ? 'hidden' : 'flex'} items-center gap-2 sm:gap-3`}>
              <button 
                onClick={() => setLang(lang === 'en' ? 'fr' : 'en')}
                aria-label={lang === 'en' ? 'Switch language to French' : 'Passer la langue en anglais'}
@@ -2498,42 +2516,158 @@ export default function App() {
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -14 }}
               transition={{ duration: 0.22 }}
-              className="w-full pointer-events-auto overflow-x-auto no-scrollbar"
+              className="w-full max-w-full sm:max-w-2xl md:max-w-3xl pointer-events-auto"
             >
-              <div className="flex items-center gap-2 pr-2 max-w-full">
-                <CompactControlButton
-                  icon={Search}
-                  label={lang === 'en' ? 'Search' : 'Recherche'}
-                  ariaLabel={lang === 'en' ? 'Expand search controls' : 'Afficher les contrôles de recherche'}
-                  onClick={exitCompactControls}
-                />
-                <CompactControlButton
-                  icon={Cloud}
-                  label={lang === 'en' ? 'Weather' : 'Météo'}
-                  ariaLabel={lang === 'en' ? 'Expand weather controls' : 'Afficher les contrôles météo'}
-                  onClick={() => {
-                    setIsWeatherExpanded(true);
-                    exitCompactControls();
-                  }}
-                />
-                <CompactControlButton
-                  icon={Clock}
-                  label={formatLocalTime(now)}
-                  ariaLabel={lang === 'en' ? 'Expand time controls' : 'Afficher les contrôles horaires'}
-                  active={simHour !== null}
-                  onClick={exitCompactControls}
-                />
-                {featureFilters.map(f => (
+              <div className="flex items-center gap-2 pr-2 max-w-full overflow-x-auto no-scrollbar">
+                {compactFeatureButtons.map(({ feature, icon, label, ariaLabel }) => (
                   <CompactControlButton
-                    key={f.id}
-                    icon={f.icon}
-                    label={f.lab}
-                    ariaLabel={`${filters.has(f.id) ? 'Disable' : 'Enable'} ${f.lab} filter`}
-                    active={filters.has(f.id)}
-                    onClick={() => toggleFilter(f.id)}
+                    key={feature}
+                    icon={icon}
+                    label={label}
+                    ariaLabel={ariaLabel}
+                    active={activeFeature === feature || (feature === 'time' && simHour !== null)}
+                    onClick={() => {
+                      if (feature === 'weather') setIsWeatherExpanded(true);
+                      toggleActiveFeature(feature);
+                    }}
                   />
                 ))}
               </div>
+              <AnimatePresence mode="wait">
+                {activeFeature && (
+                  <motion.div
+                    key={activeFeature}
+                    initial={{ opacity: 0, y: -8, height: 0 }}
+                    animate={{ opacity: 1, y: 0, height: 'auto' }}
+                    exit={{ opacity: 0, y: -8, height: 0 }}
+                    transition={{ duration: 0.22 }}
+                    className="mt-2 overflow-hidden"
+                  >
+                    <div className="glass rounded-[1.5rem] p-3 shadow-2xl max-h-[34dvh] sm:max-h-[30dvh] overflow-y-auto ios-scroll">
+                      {activeFeature === 'search' && (
+                        <div className="flex flex-col gap-2">
+                          <div className="flex items-center gap-2 rounded-2xl bg-white/80 border border-[var(--border)] px-3 py-2">
+                            <Search className="text-[var(--ink3)] w-5 h-5 shrink-0" />
+                            <input
+                              type="text"
+                              placeholder={T[lang].searchPlaceholder}
+                              className="flex-1 min-w-0 bg-transparent border-none focus:outline-none text-[16px] py-1 placeholder:text-[var(--ink3)] font-medium text-[var(--ink)]"
+                              value={searchInput}
+                              onChange={(e) => handleSearch(e.target.value)}
+                              onKeyDown={(e) => e.key === 'Enter' && executeSearch()}
+                            />
+                            {loading && <Loader2 className="animate-spin w-5 h-5 text-[var(--amber)] shrink-0" />}
+                            <button
+                              type="button"
+                              onClick={handleGps}
+                              disabled={isSearchingGps}
+                              aria-label={lang === 'en' ? 'Use current location' : 'Utiliser ma position'}
+                              className="w-10 h-10 rounded-xl border border-[var(--border)] text-[var(--amber)] flex items-center justify-center shrink-0"
+                            >
+                              <Navigation className="w-5 h-5" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={executeSearch}
+                              className="h-10 px-4 bg-[var(--amber)] text-white text-[10px] font-black uppercase rounded-xl shadow-lg shadow-[var(--amber)]/20 shrink-0"
+                            >
+                              {T[lang].go}
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                      {activeFeature === 'weather' && (
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                          {[
+                            [T[lang].weather, `${weather?.temp ?? '--'}°C`],
+                            [T[lang].clouds, `${weather?.cloud ?? 0}%`],
+                            [T[lang].uv, (sunPos.altitude * 5).toFixed(1)],
+                            [lang === 'en' ? 'Status' : 'Statut', weather?.condition || 'Clear'],
+                          ].map(([label, value]) => (
+                            <div key={label} className="rounded-2xl bg-white/80 border border-[var(--border)] p-3">
+                              <span className="block text-[8px] font-black uppercase tracking-widest text-[var(--ink3)]">{label}</span>
+                              <span className="block text-sm font-black text-[var(--ink)] mt-1 truncate">{value}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {activeFeature === 'time' && (
+                        <div className="flex items-center gap-3 rounded-2xl bg-white/80 border border-[var(--border)] p-3">
+                          <div className="px-4 py-3 bg-[var(--ink)] rounded-2xl text-white font-mono text-[10px] font-black tabular-nums shrink-0">
+                            {formatLocalTime(now)}
+                          </div>
+                          <input
+                            type="range" min="6" max="21" step="0.25"
+                            value={simHour ?? getLocalTimeParts(currentTime).h + getLocalTimeParts(currentTime).m/60}
+                            onChange={(e) => setSimHour(parseFloat(e.target.value))}
+                            className="flex-1 min-w-0 h-3 bg-black/5 appearance-none accent-[var(--amber)] cursor-pointer rounded-full"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setSimHour(null)}
+                            className={`px-3 py-2 rounded-xl text-[9px] font-black uppercase transition-all shrink-0 ${simHour === null ? 'bg-[var(--amber)] text-white' : 'text-[var(--amber)] hover:bg-[var(--amber)]/5'}`}
+                          >
+                            Now
+                          </button>
+                        </div>
+                      )}
+                      {activeFeature === 'filters' && (
+                        <div className="flex flex-wrap gap-2">
+                          {featureFilters.map(f => <FeatureFilterButton key={f.id} f={f} compact />)}
+                        </div>
+                      )}
+                      {activeFeature === 'add' && (
+                        <div className="flex items-center justify-between gap-3 rounded-2xl bg-white/80 border border-[var(--border)] p-3">
+                          <div className="min-w-0">
+                            <span className="block text-[10px] font-black uppercase tracking-widest text-[var(--ink)]">{lang === 'en' ? 'Add outdoor spot' : 'Ajouter un lieu dehors'}</span>
+                            <span className="block text-[9px] font-bold uppercase tracking-widest text-[var(--ink3)] truncate">{center.name}</span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => openSeatingSpotSubmit()}
+                            className="h-10 px-4 rounded-xl bg-[var(--amber)] text-white text-[10px] font-black uppercase shadow-xl shadow-[var(--amber)]/20 shrink-0"
+                          >
+                            {lang === 'en' ? 'Add' : 'Ajouter'}
+                          </button>
+                        </div>
+                      )}
+                      {activeFeature === 'analysis' && (
+                        <div className="space-y-3">
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="min-w-0">
+                              <span className="block text-[10px] font-black uppercase tracking-widest text-[var(--ink)]">
+                                {lang === 'en' ? 'Scroll-up base' : 'Base du scroll-up'}
+                              </span>
+                              <span className="block text-[9px] font-bold uppercase tracking-widest text-[var(--ink3)] truncate">
+                                {lang === 'en' ? 'Markdown reference' : 'Référence markdown'}
+                              </span>
+                            </div>
+                          </div>
+                          <div className="rounded-2xl border border-[var(--border)] bg-white/90 p-4 text-[13px] leading-relaxed text-[var(--ink2)] space-y-3">
+                            <ReactMarkdown
+                              components={{
+                                h1: ({ children }) => <h1 className="text-lg font-black text-[var(--ink)]">{children}</h1>,
+                                h2: ({ children }) => <h2 className="text-sm font-black text-[var(--ink)] uppercase tracking-widest">{children}</h2>,
+                                h3: ({ children }) => <h3 className="text-[12px] font-black text-[var(--ink)] uppercase tracking-widest">{children}</h3>,
+                                p: ({ children }) => <p className="text-[13px] leading-relaxed text-[var(--ink2)]">{children}</p>,
+                                ul: ({ children }) => <ul className="space-y-2 pl-4 list-disc">{children}</ul>,
+                                li: ({ children }) => <li className="text-[13px] leading-relaxed">{children}</li>,
+                                a: ({ href, children }) => (
+                                  <a href={href} target="_blank" rel="noreferrer" className="text-[var(--amber)] font-bold">
+                                    {children}
+                                  </a>
+                                ),
+                              }}
+                            >
+                              {scrollUpMarkdown}
+                            </ReactMarkdown>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
             </motion.div>
           )}
         </AnimatePresence>
@@ -2745,8 +2879,13 @@ export default function App() {
         dragConstraints={{ top: 80, bottom: 950 }}
         dragElastic={0.1}
         initial={{ y: '90%' }}
-        animate={{ y: getSheetY() }}
-        onDragEnd={settleSheet}
+        animate={{ 
+          y: isMapCompactMode && activeTab === 'map' && !selectedPlace
+            ? '76%'
+            : (selectedPlace || activeTab !== 'map' || processedPlaces.length > 0 || hasActiveSearch) 
+            ? (selectedPlace ? '15%' : '45%') 
+            : '82%' 
+        }}
         transition={{ type: 'spring', damping: 30, stiffness: 150 }}
         className="absolute inset-x-0 bottom-0 z-[1001] pointer-events-none pt-[100px] sm:pt-[120px]"
       >
@@ -2776,8 +2915,8 @@ export default function App() {
           <div
             ref={resultsScrollRef}
             onScroll={(event) => {
-              if ((activeTab === 'map' || activeTab === 'list') && !selectedPlace) {
-                setIsMapCompactMode(event.currentTarget.scrollTop > 24);
+              if ((activeTab === 'map' || activeTab === 'list') && !selectedPlace && event.currentTarget.scrollTop > 24) {
+                setIsMapCompactMode(true);
               }
             }}
             className="flex-1 overflow-y-auto px-4 sm:px-6 pb-40 no-scrollbar ios-scroll pointer-events-auto touch-pan-y"
